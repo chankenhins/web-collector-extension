@@ -128,7 +128,7 @@ flowchart LR
 
 ---
 
-## 五、项目目录结构
+## 五、项目结构
 
 ```text
 web-collector-extension/
