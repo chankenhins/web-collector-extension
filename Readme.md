@@ -183,7 +183,7 @@ web-collector-extension/
 1. 获取代码：
 
    ```bash
-   git clone https://gitee.com/kenhins/web-collector-extension.git
+   git clone https://github.com/chankenhins/web-collector-extension.git
    ```
 
    或直接下载 ZIP 解压。
