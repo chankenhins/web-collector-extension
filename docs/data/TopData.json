@@ -1,0 +1,101 @@
+{
+  "app": "TopData",
+  "kind": "workflow",
+  "version": 1,
+  "exportedAt": "2026-11-11T07:48:31.301Z",
+  "workflows": [
+    {
+      "name": "TopData",
+      "updatedAt": 1794383305030,
+      "nodes": [
+        {
+          "type": "openTab",
+          "config": {
+            "url": "https://www.toptoon.net/comic/epList/81227",
+            "openMode": "new",
+            "extraWaitSec": 0,
+            "autoClose": false
+          }
+        },
+        {
+          "type": "extract",
+          "config": {
+            "varName": "title",
+            "selectorType": "css",
+            "selector": "section.infoContent:nth-of-type(1) > div.title:nth-of-type(1)",
+            "extractType": "text",
+            "attrName": "",
+            "multiMode": "first",
+            "joinSep": "\n",
+            "waitSec": 5,
+            "onMissing": "stop",
+            "regexOn": false,
+            "regexPattern": "",
+            "regexFlags": "g",
+            "regexRepl": ""
+          }
+        },
+        {
+          "type": "extract",
+          "config": {
+            "varName": "desc",
+            "selectorType": "css",
+            "selector": "div.desc",
+            "extractType": "text",
+            "attrName": "",
+            "multiMode": "first",
+            "joinSep": "\n",
+            "waitSec": 5,
+            "onMissing": "stop",
+            "regexOn": false,
+            "regexPattern": "",
+            "regexFlags": "g",
+            "regexRepl": ""
+          }
+        },
+        {
+          "type": "list",
+          "config": {
+            "varName": "roleList",
+            "selectorType": "css",
+            "selector": "div.thumb",
+            "extractType": "text",
+            "attrName": "",
+            "fields": [
+              {
+                "attrName": "",
+                "extractType": "text",
+                "key": "name",
+                "selector": "div.characterName",
+                "selectorType": "css"
+              },
+              {
+                "attrName": "",
+                "extractType": "text",
+                "key": "text",
+                "selector": "div.characterDescription",
+                "selectorType": "css"
+              }
+            ],
+            "pagingOn": false,
+            "nextSelector": "",
+            "nextSelectorType": "css",
+            "maxPages": 5,
+            "pageWaitSec": 2,
+            "regexOn": false,
+            "regexPattern": "",
+            "regexFlags": "g",
+            "regexRepl": ""
+          }
+        },
+        {
+          "type": "assemble",
+          "config": {
+            "title": "md文档",
+            "template": "## 韩漫《{{title}}》在线免费阅读\n\n韩漫《{{title}}》未删减版在线免费阅读，{{desc}}\n\n## 角色介绍\n\n{{#each roleList}} \n**{{item.name}}** - {{item.text}} \n{{/each}} \n\n> 更多漫画等你来撩！赶紧点击下载观看漫画吧！还可以与书友们互动哦。  \n> 最后送上福利：  [在线阅读](http://www.insgame.online/insweb?pid=pl716)\n\n有时候换换口味也是好的。\n\n## 更多《漫画》推荐：\n\n[《享乐补习街》](http://www.insgame.online/insweb?pid=pl716) [《健身教练》](http://www.insgame.online/insweb?pid=pl716) [《私人司机》](http://www.insgame.online/insweb?pid=pl716) [《花店三母女》](http://www.insgame.online/insweb?pid=pl716)\n\n[《老婆的闺蜜》](http://www.insgame.online/insweb?pid=pl716) [《职场陷阱》](http://www.insgame.online/insweb?pid=pl716) [《工做狂女上司》](http://www.insgame.online/insweb?pid=pl716) [《直男逆袭婚友社》](http://www.insgame.online/insweb?pid=pl716)\n\n[《幸福都市》](http://www.insgame.online/insweb?pid=pl716) [《友情万睡》](http://www.insgame.online/insweb?pid=pl716) [《夏日深处》](http://www.insgame.online/insweb?pid=pl716) [《寄宿日记》](http://www.insgame.online/insweb?pid=pl716)\n\n"
+          }
+        }
+      ]
+    }
+  ]
+}
