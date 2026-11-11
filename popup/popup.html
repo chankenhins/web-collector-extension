@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <title>TopData</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <header class="pop-header">
+    <span class="logo-badge">T</span>
+    <span class="pop-title">TopData</span>
+    <button id="pickBtn" class="icon-btn" title="在当前页面可视化选择元素">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+        <circle cx="12" cy="12" r="4"></circle>
+        <path d="M12 2v3M12 19v3M2 12h3M19 12h3"></path>
+      </svg>
+    </button>
+    <button id="newBtn" class="btn btn-primary" title="新建工作流并在编辑器中打开">＋ 新建</button>
+  </header>
+
+  <div id="popMsg" class="pop-msg hidden"></div>
+  <div id="wfList" class="wf-list"></div>
+  <div id="wfEmpty" class="empty hidden">暂无工作流<br>点击右上角「＋ 新建」开始</div>
+
+  <footer class="pop-footer">
+    <a href="#" id="openHome">管理全部工作流 ›</a>
+  </footer>
+
+  <script src="../common/store.js"></script>
+  <script src="../common/inspector.js"></script>
+  <script src="popup.js"></script>
+</body>
+</html>

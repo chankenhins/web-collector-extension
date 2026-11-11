@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>TopData</title>
+  <link rel="stylesheet" href="editor.css">
+</head>
+<body>
+  <!-- ========== 主页：工作流列表 ========== -->
+  <div id="homeView">
+    <header class="home-header">
+      <div class="brand">
+        <span class="logo-badge">T</span>
+        <span class="home-title">TopData</span>
+      </div>
+      <button id="homeNewBtn" class="btn btn-primary">＋ 新建工作流</button>
+    </header>
+    <main class="home-main">
+      <div id="homeList" class="wf-list"></div>
+      <div id="homeEmpty" class="empty-hint hidden">
+        还没有工作流，点击右上角「＋ 新建工作流」开始搭建采集流程。
+      </div>
+    </main>
+  </div>
+
+  <!-- ========== 编辑器视图 ========== -->
+  <div id="editorView">
+    <!-- 顶部栏 -->
+    <header id="topbar">
+      <div class="brand">
+        <button id="backBtn" class="btn" title="返回工作流列表">← 列表</button>
+        <input id="workflowName" type="text" maxlength="50" placeholder="未命名工作流" title="工作流名称">
+      </div>
+      <div class="top-actions">
+        <button id="settingsBtn" class="btn">全局设置</button>
+        <button id="runBtn" class="btn btn-primary">运行</button>
+      </div>
+    </header>
+
+    <!-- 主区域：左节点列表 + 右配置表单 -->
+    <main id="main">
+      <aside id="nodePanel">
+        <div class="panel-title">节点流程</div>
+        <div id="nodeList" class="node-list"></div>
+        <div class="add-node-wrap">
+          <button id="addNodeBtn" class="btn btn-dashed">+ 添加节点</button>
+          <div id="addNodeMenu" class="add-node-menu hidden"></div>
+        </div>
+      </aside>
+
+      <section id="configPanel">
+        <div class="panel-title">节点配置</div>
+        <div id="configForm" class="config-form"></div>
+      </section>
+    </main>
+
+    <!-- 底部：日志 / 输出摘要 / Markdown 结果 -->
+    <footer id="bottomPanel">
+      <div class="tabs">
+        <button class="tab active" data-tab="log">运行日志</button>
+        <button class="tab" data-tab="output">输出摘要</button>
+        <button class="tab" data-tab="result">Markdown 结果</button>
+      </div>
+      <div class="tab-pages">
+        <div id="tab-log" class="tab-page"><div id="logList" class="log-list"></div></div>
+        <div id="tab-output" class="tab-page hidden">
+          <table class="output-table" id="outputTable">
+            <thead><tr><th style="width:180px">变量名</th><th>值（超长截断）</th></tr></thead>
+            <tbody></tbody>
+          </table>
+          <div id="outputEmpty" class="empty-hint">本次运行暂无变量输出</div>
+        </div>
+        <div id="tab-result" class="tab-page hidden">
+          <div class="result-toolbar">
+            <button id="copyMdBtn" class="btn">复制 Markdown</button>
+            <button id="downloadMdBtn" class="btn">下载 .md</button>
+            <span id="resultHint" class="hint"></span>
+          </div>
+          <div class="result-panes">
+            <textarea id="mdSource" readonly placeholder="运行成功后，这里显示 Markdown 源码"></textarea>
+            <div id="mdPreview" class="md-preview"></div>
+          </div>
+        </div>
+      </div>
+    </footer>
+  </div>
+
+  <!-- 全局设置弹窗 -->
+  <div id="settingsModal" class="modal-mask hidden">
+    <div class="modal">
+      <div class="modal-title">全局设置</div>
+      <div class="form-field">
+        <label>页面加载超时时间（秒）</label>
+        <input id="setPageTimeout" type="number" min="10" max="120" step="1">
+        <div class="field-hint">范围 10–120，默认 30。打开标签页时等待页面加载完成的超时时间。</div>
+      </div>
+      <div class="form-field">
+        <label>图片下载子文件夹名</label>
+        <input id="setImageFolder" type="text" maxlength="100">
+        <div class="field-hint">保存在浏览器默认下载目录之下，默认 web-collector/images。仅支持相对子路径，不支持绝对路径。</div>
+      </div>
+      <div class="modal-actions">
+        <button id="settingsCancel" class="btn">取消</button>
+        <button id="settingsSave" class="btn btn-primary">保存</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="../common/store.js"></script>
+  <script src="../common/inspector.js"></script>
+  <script src="editor.js"></script>
+</body>
+</html>

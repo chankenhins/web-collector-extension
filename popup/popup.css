@@ -1,0 +1,146 @@
+/* 网页采集助手 · 图标弹窗（popup）样式 */
+:root {
+  --primary: #4f6ef7;
+  --primary-dark: #3b58d8;
+  --danger: #dc2626;
+  --text: #1f2937;
+  --text-2: #6b7280;
+  --border: #e5e7eb;
+  --bg: #f5f6f8;
+  --panel: #ffffff;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  width: 320px;
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", "Segoe UI", sans-serif;
+  font-size: 13px;
+  color: var(--text);
+  background: var(--bg);
+}
+
+/* ===== 头部 ===== */
+.pop-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+}
+.logo-badge {
+  width: 24px; height: 24px;
+  border-radius: 6px;
+  background: var(--primary);
+  color: #fff;
+  display: inline-flex; align-items: center; justify-content: center;
+  font-weight: 700; font-size: 12px;
+  flex: 0 0 auto;
+}
+.pop-title { font-weight: 700; flex: 1 1 auto; }
+
+/* ===== 按钮 ===== */
+.btn {
+  border: 1px solid var(--border);
+  background: #fff;
+  color: var(--text);
+  border-radius: 6px;
+  padding: 4px 9px;
+  font-size: 12px;
+  cursor: pointer;
+  transition: all .15s;
+  white-space: nowrap;
+}
+.btn:hover { border-color: var(--primary); color: var(--primary); }
+.btn-primary { background: var(--primary); border-color: var(--primary); color: #fff; }
+.btn-primary:hover { background: var(--primary-dark); color: #fff; }
+
+/* 图标按钮（可视化选择元素） */
+.icon-btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 28px; height: 28px;
+  border: 1px solid var(--border);
+  background: #fff;
+  color: var(--text-2);
+  border-radius: 7px;
+  cursor: pointer;
+  padding: 0;
+  transition: all .15s;
+  flex: 0 0 auto;
+}
+.icon-btn:hover { border-color: var(--primary); color: var(--primary); background: #eef2ff; }
+
+/* ===== 提示条 ===== */
+.pop-msg {
+  padding: 7px 12px;
+  background: #fef2f2;
+  color: #b91c1c;
+  font-size: 12px;
+  border-bottom: 1px solid var(--border);
+  line-height: 1.5;
+}
+
+/* ===== 工作流列表 ===== */
+.wf-list {
+  max-height: 360px;
+  overflow-y: auto;
+  padding: 8px;
+}
+.wf-item {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 9px 10px;
+  margin-bottom: 6px;
+}
+.wf-item:hover { border-color: #c7d2fe; }
+.wf-name {
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin-bottom: 7px;
+}
+.wf-name:hover { color: var(--primary); }
+.wf-ops { display: flex; gap: 6px; }
+.wf-ops .btn { flex: 1 1 0; padding: 4px 0; text-align: center; }
+
+.rename-input {
+  width: 100%;
+  border: 1px solid var(--primary);
+  border-radius: 6px;
+  padding: 4px 7px;
+  font-size: 13px;
+  font-weight: 600;
+  margin-bottom: 7px;
+  outline: none;
+  box-shadow: 0 0 0 2px rgba(79,110,247,.12);
+}
+
+/* ===== 空态 / 底部 ===== */
+.empty {
+  text-align: center;
+  color: var(--text-2);
+  padding: 28px 0;
+  line-height: 1.9;
+}
+.pop-footer {
+  border-top: 1px solid var(--border);
+  background: var(--panel);
+  padding: 8px 12px;
+  text-align: center;
+}
+.pop-footer a {
+  color: var(--text-2);
+  text-decoration: none;
+  font-size: 12px;
+}
+.pop-footer a:hover { color: var(--primary); }
+
+.hidden { display: none !important; }
+
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-thumb { background: #d1d5db; border-radius: 3px; }
