@@ -283,6 +283,54 @@ body.editor-mode #editorView {
 .regex-body .form-row, .paging-body .form-row { margin-top: 7px; }
 .paging-body .field-hint { margin-top: 6px; }
 
+/* 批量提取：字段映射 */
+.field-list { display: flex; flex-direction: column; gap: 8px; margin-bottom: 8px; }
+.field-row {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: #fff;
+}
+.field-row-hd { display: flex; gap: 6px; align-items: center; margin-bottom: 6px; }
+.field-key { flex: 1 1 auto; min-width: 0; font-weight: 600; }
+.field-del {
+  width: 24px; height: 24px;
+  flex: 0 0 auto;
+  border: 1px solid var(--border);
+  background: #fff;
+  border-radius: 6px;
+  color: var(--text-2);
+  cursor: pointer;
+  line-height: 1;
+}
+.field-del:hover { border-color: var(--danger); color: var(--danger); }
+.field-row .picker-row { margin-bottom: 6px; }
+.field-row .picker-row .btn { padding: 0 8px; font-size: 11px; }
+.field-row .form-row { gap: 8px; }
+.field-row .form-field { margin-bottom: 0; }
+
+/* 字段映射：填写说明 */
+.field-help {
+  margin-top: 8px;
+  padding: 8px 10px;
+  background: #f8fafc;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 11px;
+  color: var(--text-2);
+  line-height: 1.7;
+}
+.field-help-t { font-weight: 600; color: var(--text); margin-bottom: 2px; }
+.field-help b { color: var(--text); font-weight: 600; }
+.field-help code {
+  background: #eef2ff;
+  color: var(--primary-dark);
+  border-radius: 4px;
+  padding: 0 4px;
+  font-family: "SF Mono", Menlo, Consolas, monospace;
+}
+.field-help-ex { margin-top: 4px; padding-top: 4px; border-top: 1px dashed var(--border); }
+
 /* 变量引用 chips */
 .var-chips { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 6px; }
 .var-chip {

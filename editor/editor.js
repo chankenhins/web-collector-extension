@@ -34,7 +34,7 @@ const DEFAULTS = {
     multiMode: 'first', joinSep: '\n', waitSec: 5, onMissing: 'stop', ...DEFAULT_REGEX(),
   }),
   list:     () => ({
-    varName: '', selectorType: 'css', selector: '', extractType: 'text', attrName: '',
+    varName: '', selectorType: 'css', selector: '', extractType: 'text', attrName: '', fields: [],
     pagingOn: false, nextSelector: '', nextSelectorType: 'css', maxPages: 5, pageWaitSec: 2,
     ...DEFAULT_REGEX(),
   }),
@@ -170,7 +170,7 @@ function applyRegex(value, cfg) {
   return String(value).replace(re, cfg.regexRepl == null ? '' : cfg.regexRepl);
 }
 
-/* 渲染模板：支持 {{变量}} 与 {{#each 列表}}…{{/each}}（块内 {{item}} / {{index}}） */
+/* 渲染模板：支持 {{变量}}、{{item.字段}} 与 {{#each 列表}}…{{/each}}（块内 {{item}} / {{index}}） */
 function renderTemplate(tpl, vars, scope) {
   let out = String(tpl).replace(EACH_BLOCK_RE, (m, name, inner) => {
     const arr = vars[name.trim()];
@@ -180,14 +180,28 @@ function renderTemplate(tpl, vars, scope) {
   out = out.replace(TEMPLATE_REF_RE, (m, raw) => {
     const key = raw.trim();
     if (scope) {
-      if (key === 'item' || key === 'this') return scope.item == null ? '' : String(scope.item);
+      const field = /^(?:item|this)\.(.+)$/.exec(key);
+      if (field) {
+        const src = scope.item;
+        if (!src || typeof src !== 'object') return '';
+        const v = src[field[1]];
+        return v == null ? '' : String(v);
+      }
+      if (key === 'item' || key === 'this') return stringifyValue(scope.item);
       if (key === 'index') return String(scope.index);
     }
     if (!Object.prototype.hasOwnProperty.call(vars, key)) return '';
-    const v = vars[key];
-    return Array.isArray(v) ? v.join('\n') : String(v == null ? '' : v);
+    return stringifyValue(vars[key]);
   });
   return out;
+}
+
+/* 变量值转文本：集合按换行展开，对象转 JSON */
+function stringifyValue(v) {
+  if (v == null) return '';
+  if (Array.isArray(v)) return v.map(stringifyValue).join('\n');
+  if (typeof v === 'object') return JSON.stringify(v);
+  return String(v);
 }
 
 /* ---------- 初始化与页面路由 ---------- */
@@ -515,15 +529,33 @@ function bindEditorUI() {
     if (!msg || msg.type !== 'WCA_INSPECTOR_RESULT') return;
     if (!pickRequestId || msg.requestId !== pickRequestId) return;
     const node = getNode(pickNodeId);
-    if (msg.selector && node) {
-      node.config.selector = msg.selector;
-      if (msg.selectorType) node.config.selectorType = msg.selectorType;
+    const fieldIdx = pickFieldIndex;
+    const field = node && fieldIdx != null && Array.isArray(node.config.fields)
+      ? node.config.fields[fieldIdx] : null;
+    if (msg.selector && field) {
+      // 字段映射点选：优先使用“相对当前列表项”的选择器
+      field.selector = typeof msg.relativeSelector === 'string' ? msg.relativeSelector : msg.selector;
+      field.selectorType = 'css';
+      if (!field.extractType) field.extractType = 'text';
       invalidIds.delete(node.id);
       saveState();
       renderConfigForm();
       renderNodeList();
       switchTab('log');
-      log('success', `已填入选择器（${msg.selectorType === 'xpath' ? 'XPath' : 'CSS'}）：${msg.selector}`);
+      log('success', `字段「${field.key || '未命名字段'}」选择器已填入：${field.selector || '（留空 = 当前列表项元素本身）'}`);
+    } else if (msg.selector && node) {
+      node.config.selector = msg.selector;
+      if (msg.selectorType) node.config.selectorType = msg.selectorType;
+      if (msg.multiMatch && node.type === 'extract') node.config.multiMode = 'all';
+      invalidIds.delete(node.id);
+      saveState();
+      renderConfigForm();
+      renderNodeList();
+      switchTab('log');
+      const matchTip = msg.multiMatch
+        ? (node.type === 'extract' ? '（已同时把“多匹配处理”设为全部）' : '（多元素匹配已开启）')
+        : '';
+      log('success', `已填入选择器（${msg.selectorType === 'xpath' ? 'XPath' : 'CSS'}）：${msg.selector}${matchTip}`);
     } else {
       switchTab('log');
       log('info', '已关闭选择面板，未选择元素。');
@@ -631,8 +663,17 @@ function nodeSubtitle(node) {
   const c = node.config;
   switch (node.type) {
     case 'openTab': return c.url || '未配置 URL';
-    case 'extract': return c.selector ? `${selPrefix(c)}${c.selector} → ${c.extractType === 'attr' ? '@' + (c.attrName || '?') : '文本'}` : '未配置选择器';
-    case 'list':    return c.selector ? `${selPrefix(c)}${c.selector}${c.pagingOn ? ' · 翻页' : ''}` : '未配置选择器';
+    case 'extract': {
+      if (!c.selector) return '未配置选择器';
+      const listTag = c.multiMode === 'list' ? ' · 列表集合' : '';
+      return `${selPrefix(c)}${c.selector} → ${c.extractType === 'attr' ? '@' + (c.attrName || '?') : '文本'}${listTag}`;
+    }
+    case 'list': {
+      const nf = (c.fields || []).length;
+      return c.selector
+        ? `${selPrefix(c)}${c.selector}${nf ? ` · ${nf} 个字段` : ''}${c.pagingOn ? ' · 翻页' : ''}`
+        : '未配置选择器';
+    }
     case 'image':   return c.sourceMode === 'var'
       ? `{{${c.srcVar || '?'}}} → ${c.refMode === 'url' ? '原始URL' : '本地下载'}`
       : (c.selector ? `${selPrefix(c)}${c.selector} → ${c.refMode === 'url' ? '原始URL' : '本地下载'}` : '未配置选择器');
@@ -758,7 +799,7 @@ function renderConfigForm() {
         <input type="text" data-k="attrName" value="${escapeAttr(c.attrName)}" placeholder="如：href、src、alt、data-id">
         <div class="field-hint">href / src 会自动转为绝对 URL。</div>
       </div>
-      ${f('多匹配处理', radio('multiMode', c.multiMode, [['first', '仅第一个'], ['all', '全部（拼接）']]), true)}
+      ${f('多匹配处理', radio('multiMode', c.multiMode, [['first', '仅第一个'], ['all', '全部（拼接）'], ['list', '列表集合（返回 list）']]), true, '“列表集合”会把全部匹配项作为数组存入变量：可用循环节点逐项处理，或在文章组装中用 {{#each 变量名}} 渲染。')}
       <div class="form-field" data-show="multiMode" data-value="all">
         <label>拼接分隔符</label>
         <input type="text" data-k="joinSep" value="${escapeAttr(c.joinSep)}" placeholder="默认换行">
@@ -793,15 +834,18 @@ function renderConfigForm() {
   }
 
   if (node.type === 'list') {
+    const hasFields = (c.fields || []).length > 0;
     body = `
-      ${f('集合变量名', `<input type="text" data-k="varName" value="${escapeAttr(c.varName)}" placeholder="如：链接列表">`, true, '产出一个集合变量（数组），供循环节点遍历、文章组装 {{#each}} 渲染。')}
+      ${f('集合变量名', `<input type="text" data-k="varName" value="${escapeAttr(c.varName)}" placeholder="如：文章列表">`, true, '产出一个集合变量（数组），供循环节点遍历、文章组装 {{#each}} 渲染。')}
       ${selectorField(c, '匹配到的全部元素会逐个取值组成集合。')}
+      ${hasFields ? '' : `
       ${f('提取类型', radio('extractType', c.extractType, [['text', '元素文本'], ['attr', '属性值']]), true)}
       <div class="form-field" data-show="extractType" data-value="attr">
         <label>属性名<span class="req">*</span></label>
         <input type="text" data-k="attrName" value="${escapeAttr(c.attrName)}" placeholder="如：href、src">
         <div class="field-hint">href / src 会自动转为绝对 URL。</div>
-      </div>
+      </div>`}
+      ${fieldMappingBlock(c)}
       <div class="form-field">
         <label class="switch-field"><input type="checkbox" data-k="pagingOn" ${c.pagingOn ? 'checked' : ''}> 翻页采集（点击“下一页”继续收集）</label>
         <div class="paging-body" data-show="pagingOn">
@@ -822,7 +866,7 @@ function renderConfigForm() {
           <div class="field-hint">仅支持点击后页面不整体跳转的翻页；若翻页会刷新整页，请改用独立工作流。</div>
         </div>
       </div>
-      ${regexBlock(c)}`;
+      ${hasFields ? '' : regexBlock(c)}`;
   }
 
   if (node.type === 'loop') {
@@ -831,7 +875,7 @@ function renderConfigForm() {
       ? listVars.map((v) => `<option value="${escapeAttr(v.name)}" ${c.overVar === v.name ? 'selected' : ''}>${escapeHtml(v.name)}</option>`).join('')
       : '<option value="">（暂无集合变量）</option>';
     body = `
-      ${f('遍历集合变量', `<select data-k="overVar">${opts}</select>`, true, '取前面“批量提取”节点产出的集合变量。')}
+      ${f('遍历集合变量', `<select data-k="overVar">${opts}</select>`, true, '取前面“批量提取”或“提取内容（列表集合）”产出的集合变量。')}
       ${f('当前项变量名', `<input type="text" data-k="itemVar" value="${escapeAttr(c.itemVar)}" placeholder="item">`, true, '循环体内用 {{变量名}} 引用当前项。')}
       <div class="field-hint">循环体 = 本节点与“循环结束”之间的全部节点，按集合项数重复执行。循环体内放“文章组装”可逐条产出多篇 Markdown。</div>`;
   }
@@ -861,7 +905,7 @@ function renderConfigForm() {
       <div class="form-field">
         <label>Markdown 模板<span class="req">*</span></label>
         <textarea data-k="template" id="templateEditor" spellcheck="false">${escapeHtml(c.template)}</textarea>
-        <div class="field-hint">使用 {{变量名}} 引用变量：集合变量默认按换行展开；也可用 {{#each 集合名}} … {{/each}} 逐项渲染，块内用 {{item}} 与 {{index}}。点击变量标签插入到光标处。</div>
+        <div class="field-hint">使用 {{变量名}} 引用变量：集合变量默认按换行展开；{{#each 集合名}} … {{/each}} 逐项渲染，块内用 {{item}} / {{index}}，对象集合用 {{item.字段名}}（如 {{item.name}}）。点击变量标签插入到光标处。</div>
         <div class="var-chips">${chips}</div>
       </div>
       <div class="field-hint">位于循环体内时，每次循环都会产出一篇独立 Markdown，结果面板可逐篇切换、批量下载。</div>`;
@@ -888,7 +932,43 @@ function renderConfigForm() {
   box.querySelectorAll('[data-action="pick"]').forEach((btn) => {
     btn.addEventListener('click', () => startPicker(node, btn));
   });
+  // 批量提取：字段映射 -> 为该字段点选元素（相对当前列表项）
+  box.querySelectorAll('[data-field-pick]').forEach((btn) => {
+    btn.addEventListener('click', () => startPicker(node, btn, parseInt(btn.dataset.fieldPick, 10)));
+  });
+  // 批量提取：字段映射的增删与输入
+  box.querySelectorAll('[data-fk]').forEach((el) => {
+    const onChange = () => updateFieldConfig(node, el);
+    el.addEventListener('input', onChange);
+    el.addEventListener('change', onChange);
+  });
+  box.querySelectorAll('[data-field-add]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      if (!Array.isArray(node.config.fields)) node.config.fields = [];
+      node.config.fields.push(newListField());
+      saveState();
+      renderConfigForm();
+      renderNodeList();
+    });
+  });
+  box.querySelectorAll('[data-field-del]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      node.config.fields.splice(parseInt(btn.dataset.fieldDel, 10), 1);
+      saveState();
+      renderConfigForm();
+      renderNodeList();
+    });
+  });
   applyConditionalFields(node);
+}
+
+/* 更新字段映射中的某一项 */
+function updateFieldConfig(node, el) {
+  const idx = parseInt(el.dataset.fi, 10);
+  const field = node.config.fields && node.config.fields[idx];
+  if (!field) return;
+  field[el.dataset.fk] = el.type === 'checkbox' ? el.checked : el.value;
+  saveState();
 }
 
 /* 字段联动显隐：data-show=<配置键>，data-value 为空表示按真假判断 */
@@ -943,12 +1023,59 @@ function regexBlock(c) {
   </div>`;
 }
 
+/* 批量提取：字段映射（key → 值），每个列表项输出一个对象 */
+function fieldMappingBlock(c) {
+  const fields = Array.isArray(c.fields) ? c.fields : [];
+  const rows = fields.map((fd, i) => `
+    <div class="field-row">
+      <div class="field-row-hd">
+        <input type="text" class="field-key" data-fk="key" data-fi="${i}" value="${escapeAttr(fd.key || '')}" placeholder="字段名，如 id / name / date">
+        <button class="field-del" data-field-del="${i}" title="删除该字段">×</button>
+      </div>
+      <div class="picker-row">
+        <select class="inline-select" data-fk="selectorType" data-fi="${i}">
+          <option value="css" ${fd.selectorType !== 'xpath' ? 'selected' : ''}>CSS</option>
+          <option value="xpath" ${fd.selectorType === 'xpath' ? 'selected' : ''}>XPath</option>
+        </select>
+        <input type="text" data-fk="selector" data-fi="${i}" value="${escapeAttr(fd.selector || '')}" placeholder="留空 = 当前项元素本身">
+        <button class="btn" data-field-pick="${i}" title="在网页上点选元素，自动生成相对当前列表项的选择器">选择元素</button>
+      </div>
+      <div class="form-row">
+        ${f('取值', `<select data-fk="extractType" data-fi="${i}">
+          <option value="text" ${fd.extractType !== 'attr' ? 'selected' : ''}>元素文本</option>
+          <option value="attr" ${fd.extractType === 'attr' ? 'selected' : ''}>属性值</option>
+        </select>`)}
+        ${f('属性名', `<input type="text" data-fk="attrName" data-fi="${i}" value="${escapeAttr(fd.attrName || '')}" placeholder="如 href、src">`)}
+      </div>
+    </div>`).join('');
+
+  return `<div class="form-field">
+    <label>字段映射（可选，把每个列表项变成对象）</label>
+    <div class="field-list">${rows || '<div class="field-hint">未添加字段时，每个列表项只产出一个文本 / 属性值。</div>'}</div>
+    <button class="btn btn-dashed" data-field-add="1">＋ 添加字段</button>
+    <div class="field-help">
+      <div class="field-help-t">怎样填写</div>
+      <div><b>字段名</b>：对象里的属性名，模板中用 <code>{{item.字段名}}</code> 引用，如 id / name / date。</div>
+      <div><b>选择器</b>：相对“当前列表项”查找，点「选择元素」可直接点选，会自动写成相对写法（如 <code>.item-name</code>）；留空表示取列表项元素本身。XPath 相对查找请以 <code>.//</code> 开头。</div>
+      <div><b>取值 / 属性名</b>：取元素文本，或取属性值并填写属性名（href / src 会自动转为绝对 URL）。</div>
+      <div class="field-help-ex">示例：列表项 <code>&lt;li class="item"&gt;&lt;a class="item-name" href="/p/1"&gt;标题&lt;/a&gt;&lt;span class="item-date"&gt;10-01&lt;/span&gt;&lt;/li&gt;</code><br>
+      字段 name：选择器 <code>.item-name</code>，取值「元素文本」；字段 link：选择器 <code>.item-name</code>，取值「属性值」+ 属性名 <code>href</code>。<br>
+      模板：<code>{{#each 文章列表}}{{item.name}} | {{item.link}}{{/each}}</code></div>
+    </div>
+  </div>`;
+}
+
+function newListField() {
+  return { key: '', selectorType: 'css', selector: '', extractType: 'text', attrName: '' };
+}
+
 /* 当前工作流中可引用的变量 */
 function availableVars() {
   const out = [];
   workflow.nodes.forEach((n) => {
     const v = n.config && n.config.varName;
     if (n.type === 'list' && v) out.push({ name: v, list: true });
+    else if (n.type === 'extract' && v && n.config.multiMode === 'list') out.push({ name: v, list: true });
     else if ((n.type === 'extract' || n.type === 'image') && v) out.push({ name: v, list: false });
     else if (n.type === 'loop' && n.config.itemVar) out.push({ name: n.config.itemVar, list: false });
   });
@@ -958,7 +1085,7 @@ function availableVars() {
 function nodeDesc(type) {
   return {
     openTab: '起始节点：指定采集目标页面，每个工作流有且仅有一个。',
-    extract: '按 CSS / XPath 选择器提取元素文本或属性值，产出命名变量。',
+    extract: '按 CSS / XPath 选择器提取元素文本或属性值，产出命名变量；多匹配选“列表集合”时产出数组。',
     list: '批量提取：把匹配到的全部元素取值组成集合变量，可翻页累积。',
     image: '下载图片到本地，产出可用于 Markdown 的引用变量；也可引用图片 URL 变量配合循环批量下载。',
     loop: '循环开始：遍历集合变量，重复执行区间内的节点。',
@@ -1138,7 +1265,10 @@ function validateWorkflow() {
   workflow.nodes.forEach((n) => {
     const v = (n.config && n.config.varName || '').trim();
     if ((n.type === 'extract' || n.type === 'image' || n.type === 'list') && v) {
-      defs.set(v, { list: n.type === 'list', nodeId: n.id });
+      defs.set(v, {
+        list: n.type === 'list' || (n.type === 'extract' && n.config.multiMode === 'list'),
+        nodeId: n.id,
+      });
     }
     const iv = (n.type === 'loop' && (n.config.itemVar || '').trim()) || '';
     if (iv) defs.set(iv, { list: false, nodeId: n.id });
@@ -1165,7 +1295,8 @@ function validateWorkflow() {
         errs.push({ id: n.id, msg: `变量名「${vn}」重复` });
       }
       if (!imageVarMode && !(c.selector || '').trim()) errs.push({ id: n.id, msg: `${dn}：选择器必填` });
-      if ((n.type === 'extract' || n.type === 'list') && c.extractType === 'attr' && !(c.attrName || '').trim()) {
+      if ((n.type === 'extract' || n.type === 'list') && c.extractType === 'attr'
+        && !(c.attrName || '').trim() && !(n.type === 'list' && (c.fields || []).length)) {
         errs.push({ id: n.id, msg: `${dn}：提取属性值时属性名必填` });
       }
       if (imageVarMode) {
@@ -1179,7 +1310,20 @@ function validateWorkflow() {
       if (n.type === 'list' && c.pagingOn && !(c.nextSelector || '').trim()) {
         errs.push({ id: n.id, msg: `${dn}：开启翻页后必须填写下一页选择器` });
       }
-      if (c.regexOn) {
+      if (n.type === 'list' && Array.isArray(c.fields) && c.fields.length) {
+        const keys = new Set();
+        c.fields.forEach((fd, i) => {
+          const k = (fd.key || '').trim();
+          if (!k) errs.push({ id: n.id, msg: `${dn}：第 ${i + 1} 个字段的字段名必填` });
+          else if (!VAR_NAME_RE.test(k)) errs.push({ id: n.id, msg: `${dn}：字段名「${k}」含非法字符` });
+          else if (keys.has(k)) errs.push({ id: n.id, msg: `${dn}：字段名「${k}」重复` });
+          else keys.add(k);
+          if ((fd.extractType || 'text') === 'attr' && !(fd.attrName || '').trim()) {
+            errs.push({ id: n.id, msg: `${dn}：字段「${k || i + 1}」取属性值时属性名必填` });
+          }
+        });
+      }
+      if (c.regexOn && !(n.type === 'list' && (c.fields || []).length)) {
         if (!(c.regexPattern || '').trim()) errs.push({ id: n.id, msg: `${dn}：已开启正则后处理，但正则表达式为空` });
         else {
           try { new RegExp(c.regexPattern, c.regexFlags || 'g'); }
@@ -1192,7 +1336,7 @@ function validateWorkflow() {
       const over = (c.overVar || '').trim();
       const iv = (c.itemVar || '').trim();
       if (!over) errs.push({ id: n.id, msg: `${dn}：未指定遍历的集合变量` });
-      else if (!defs.has(over) || !defs.get(over).list) errs.push({ id: n.id, msg: `${dn}：集合变量「${over}」不存在或不是批量提取产出` });
+      else if (!defs.has(over) || !defs.get(over).list) errs.push({ id: n.id, msg: `${dn}：集合变量「${over}」不存在或不是集合类型变量` });
       if (!iv) errs.push({ id: n.id, msg: `${dn}：当前项变量名必填` });
       else if (!VAR_NAME_RE.test(iv)) errs.push({ id: n.id, msg: `${dn}：当前项变量名「${iv}」含非法字符` });
     }
@@ -1211,7 +1355,9 @@ function validateWorkflow() {
       if (!(c.template || '').trim()) errs.push({ id: n.id, msg: '文章组装：Markdown 模板必填' });
       const refs = [...(c.template || '').matchAll(TEMPLATE_REF_RE)]
         .map((m) => m[1].trim())
-        .filter((r) => r && !['item', 'index', 'this'].includes(r) && !r.startsWith('#each') && !r.startsWith('/each'));
+        .filter((r) => r && !['item', 'index', 'this'].includes(r)
+          && !r.startsWith('item.') && !r.startsWith('this.')
+          && !r.startsWith('#each') && !r.startsWith('/each'));
       const undef = [...new Set(refs.filter((r) => !vars.has(r)))];
       if (undef.length) errs.push({ id: n.id, msg: `文章组装：模板引用了未定义变量：${undef.join('、')}` });
       // each 块中的集合变量需真实存在
@@ -1440,17 +1586,26 @@ async function runNode(node, ctx) {
         waitMs: (node.config.waitSec || 0) * 1000,
       });
       ctx.vars[node.config.varName] = value;
-      ctx.outputs.push({ name: node.config.varName, value });
-      setStatus(node.id, value === '' ? 'empty' : 'success');
-      log(value === '' ? 'warn' : 'success', `变量 {{${node.config.varName}}} = ${preview(value)}`);
+      ctx.outputs.push({
+        name: Array.isArray(value) ? `${node.config.varName}（${value.length} 项）` : node.config.varName,
+        value: stringifyValue(value),
+      });
+      if (Array.isArray(value)) {
+        setStatus(node.id, value.length ? 'success' : 'empty');
+        log(value.length ? 'success' : 'warn', `集合 {{${node.config.varName}}} 共 ${value.length} 项`);
+      } else {
+        setStatus(node.id, value === '' ? 'empty' : 'success');
+        log(value === '' ? 'warn' : 'success', `变量 {{${node.config.varName}}} = ${preview(value)}`);
+      }
       break;
     }
     case 'list': {
       const values = await execList(node, ctx);
       ctx.vars[node.config.varName] = values;
-      ctx.outputs.push({ name: `${node.config.varName}（${values.length} 项）`, value: values.join('\n') });
+      ctx.outputs.push({ name: `${node.config.varName}（${values.length} 项）`, value: stringifyValue(values) });
       setStatus(node.id, values.length ? 'success' : 'empty');
-      log(values.length ? 'success' : 'warn', `集合 {{${node.config.varName}}} 共 ${values.length} 项`);
+      const fieldInfo = (node.config.fields || []).length ? `，字段：${node.config.fields.map((f) => f.key).filter(Boolean).join(' / ')}` : '';
+      log(values.length ? 'success' : 'warn', `集合 {{${node.config.varName}}} 共 ${values.length} 项${fieldInfo}`);
       break;
     }
     case 'image': {
@@ -1476,7 +1631,7 @@ async function runNode(node, ctx) {
 }
 
 function preview(v) {
-  const s = String(v);
+  const s = stringifyValue(v);
   return s.length > 80 ? s.slice(0, 80) + '…' : (s === '' ? '（空）' : s);
 }
 
@@ -1572,12 +1727,13 @@ async function execExtractLike(node, ctx, opts) {
     const continueOnMissing = cfg.onMissing === 'continue' || cfg.onFail === 'continue';
     if (continueOnMissing) {
       log('warn', `[${displayName(node)}] ${r.error}，按配置置空并继续。`);
-      return '';
+      return opts.multiMode === 'list' ? [] : '';
     }
     throw new Error(r.error);
   }
-  // 正则后处理
+  // 正则后处理（列表集合逐项处理）
   try {
+    if (Array.isArray(r.values)) return r.values.map((v) => applyRegex(v, cfg));
     return applyRegex(r.value, cfg);
   } catch (e) {
     throw makeNodeError(node, e.message);
@@ -1621,6 +1777,10 @@ function pageExtract(cfg) {
         return;
       }
       if (vals.length > 0) {
+        if (cfg.multiMode === 'list') {
+          resolve({ ok: true, values: vals.filter((v) => v !== '') });
+          return;
+        }
         let value;
         if (cfg.multiMode === 'all') {
           value = vals.filter((v) => v !== '').join(cfg.joinSep);
@@ -1644,6 +1804,8 @@ function pageExtract(cfg) {
 async function execList(node, ctx) {
   await ensureTabAlive(ctx.tabId);
   const cfg = node.config;
+  const fields = (Array.isArray(cfg.fields) ? cfg.fields : []).filter((fd) => (fd.key || '').trim());
+  const objectMode = fields.length > 0;
   const maxPages = cfg.pagingOn ? Math.max(1, cfg.maxPages || 1) : 1;
   const seen = new Set();
   const values = [];
@@ -1661,6 +1823,7 @@ async function execList(node, ctx) {
           selectorType: cfg.selectorType || 'css',
           extractType: cfg.extractType,
           attrName: cfg.attrName || '',
+          fields,
           pagingOn: !!cfg.pagingOn,
           nextSelector: cfg.nextSelector || '',
           nextSelectorType: cfg.nextSelectorType || 'css',
@@ -1675,10 +1838,14 @@ async function execList(node, ctx) {
 
     let added = 0;
     r.values.forEach((raw) => {
-      let v;
-      try { v = applyRegex(raw, cfg); } catch (e) { throw makeNodeError(node, e.message); }
-      if (v === '' || seen.has(v)) return;
-      seen.add(v);
+      let v = raw;
+      if (!objectMode) {
+        try { v = applyRegex(raw, cfg); } catch (e) { throw makeNodeError(node, e.message); }
+      }
+      const sig = typeof v === 'string' ? v : JSON.stringify(v);
+      if (sig === '') return;
+      if (seen.has(sig)) return;
+      seen.add(sig);
       values.push(v);
       added += 1;
     });
@@ -1696,22 +1863,23 @@ async function execList(node, ctx) {
   return values;
 }
 
-/* 注入目标页面：收集本页全部匹配值；翻页开启时点击"下一页" */
+/* 注入目标页面：收集本页全部匹配值（可为对象）；翻页开启时点击"下一页" */
 function pageExtractList(cfg) {
-  function queryAll(sel, type) {
+  function queryAll(sel, type, root) {
+    const ctx = root || document;
     if (type === 'xpath') {
-      const snap = document.evaluate(sel, document, null, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null);
+      const snap = document.evaluate(sel, ctx, null, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null);
       const out = [];
       for (let i = 0; i < snap.snapshotLength; i++) out.push(snap.snapshotItem(i));
       return out.filter((n) => n && n.nodeType === 1);
     }
-    return Array.from(document.querySelectorAll(sel));
+    return Array.from(ctx.querySelectorAll(sel));
   }
 
-  function pick(el) {
-    if (cfg.extractType === 'attr') {
-      let v = el.getAttribute(cfg.attrName);
-      if (v && /^(href|src)$/i.test(cfg.attrName)) {
+  function pick(el, extractType, attrName) {
+    if (extractType === 'attr') {
+      let v = el.getAttribute(attrName);
+      if (v && /^(href|src)$/i.test(attrName)) {
         try { v = new URL(v, location.href).href; } catch (e) { /* 保留原值 */ }
       }
       return (v == null ? '' : v).trim();
@@ -1719,8 +1887,34 @@ function pageExtractList(cfg) {
     return (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim();
   }
 
+  function pickField(el, fd) {
+    let target = el;
+    if ((fd.selector || '').trim()) {
+      try {
+        target = queryAll(fd.selector, fd.selectorType || 'css', el)[0] || null;
+      } catch (e) {
+        target = null;
+      }
+    }
+    if (!target) return '';
+    return pick(target, fd.extractType || 'text', fd.attrName || '');
+  }
+
   try {
-    const values = queryAll(cfg.selector, cfg.selectorType).map(pick).filter((v) => v !== '');
+    const els = queryAll(cfg.selector, cfg.selectorType);
+    let values;
+    if (cfg.fields && cfg.fields.length) {
+      values = els
+        .map((el) => {
+          const obj = {};
+          cfg.fields.forEach((fd) => { obj[(fd.key || '').trim()] = pickField(el, fd); });
+          return obj;
+        })
+        .filter((obj) => Object.keys(obj).some((k) => obj[k] !== ''));
+    } else {
+      values = els.map((el) => pick(el, cfg.extractType, cfg.attrName || '')).filter((v) => v !== '');
+    }
+
     let clicked = false;
     if (cfg.pagingOn && values.length) {
       const next = queryAll(cfg.nextSelector, cfg.nextSelectorType)[0];
@@ -1817,6 +2011,7 @@ let picking = false;
 let pickRequestId = null;
 let pickNodeId = null;
 let pickBtnRef = null;
+let pickFieldIndex = null;   // 非空表示正在为批量提取的某个字段点选
 
 /* 找到最近浏览过的普通网页标签页（排除扩展页面自身） */
 async function findTargetTab() {
@@ -1837,6 +2032,7 @@ function resetPickState() {
   picking = false;
   pickRequestId = null;
   pickNodeId = null;
+  pickFieldIndex = null;
   if (pickBtnRef) {
     pickBtnRef.classList.remove('picking');
     pickBtnRef.textContent = '选择元素';
@@ -1844,7 +2040,7 @@ function resetPickState() {
   pickBtnRef = null;
 }
 
-async function startPicker(node, btn) {
+async function startPicker(node, btn, fieldIndex) {
   if (picking || running) return;
   const tab = await findTargetTab();
   if (!tab) {
@@ -1853,23 +2049,53 @@ async function startPicker(node, btn) {
     return;
   }
 
+  const forField = Number.isInteger(fieldIndex);
+  if (forField) {
+    const itemSel = (node.config.selector || '').trim();
+    if (!itemSel) {
+      switchTab('log');
+      log('error', '请先填写或点选“列表项选择器”，再为字段点选元素：字段选择器需要相对列表项生成。');
+      return;
+    }
+    if ((node.config.selectorType || 'css') === 'xpath') {
+      switchTab('log');
+      log('error', '字段点选暂只支持 CSS 列表项选择器，请先把节点选择器类型切换为 CSS。');
+      return;
+    }
+  }
   picking = true;
   pickNodeId = node.id;
+  pickFieldIndex = forField ? fieldIndex : null;
   pickRequestId = 'p_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
   pickBtnRef = btn;
   btn.classList.add('picking');
   btn.textContent = '选择中…';
 
+  const args = {
+    mode: 'pick',
+    requestId: pickRequestId,
+    selectorType: forField ? 'css' : (node.config.selectorType || 'css'),
+  };
+  // 字段映射：把列表项选择器告诉浮层，回传“相对当前列表项”的选择器
+  if (forField && node.type === 'list' && (node.config.selector || '').trim()) {
+    args.relativeTo = {
+      selector: node.config.selector,
+      selectorType: node.config.selectorType || 'css',
+    };
+  }
+
   try {
     await chrome.scripting.executeScript({
       target: { tabId: tab.id },
       func: wcaInspector,
-      args: [{ mode: 'pick', requestId: pickRequestId, selectorType: node.config.selectorType || 'css' }],
+      args: [args],
     });
     // 切到目标页，让用户看到浮层
     await chrome.tabs.update(tab.id, { active: true });
     switchTab('log');
-    log('info', `已在「${tab.title || tab.url}」打开选择面板：打开右上角开关，点击目标元素后点“使用此选择器”。`);
+    log('info', forField
+      ? `已在「${tab.title || tab.url}」打开选择面板：点击列表项内部的元素，回传的会是相对当前列表项的选择器。`
+      : `已在「${tab.title || tab.url}」打开选择面板：打开右上角开关，点击目标元素后点“使用此选择器”。`);
   } catch (e) {
     resetPickState();
     switchTab('log');
