@@ -14,21 +14,57 @@
 /* ---------- 常量 ---------- */
 
 const NODE_TYPES = {
-  openTab:  { label: '打开标签页', badge: '页', fixed: true },
-  extract:  { label: '提取内容',   badge: '取' },
-  image:    { label: '下载图片',   badge: '图' },
-  assemble: { label: '文章组装',   badge: '文', unique: true },
+  openTab:      { label: '打开标签页', badge: '页', fixed: true },
+  extract:      { label: '提取内容',   badge: '取' },
+  list:         { label: '批量提取',   badge: '列' },
+  image:        { label: '下载图片',   badge: '图' },
+  loop:         { label: '循环开始',   badge: '循', block: true },
+  loopEnd:      { label: '循环结束',   badge: '循', fixed: true, blockEnd: true },
+  condition:    { label: '条件分支',   badge: '条', block: true },
+  conditionEnd: { label: '条件结束',   badge: '条', fixed: true, blockEnd: true },
+  assemble:     { label: '文章组装',   badge: '文', unique: true },
 };
+
+const DEFAULT_REGEX = () => ({ regexOn: false, regexPattern: '', regexFlags: 'g', regexRepl: '' });
 
 const DEFAULTS = {
   openTab:  () => ({ url: '', openMode: 'new', extraWaitSec: 0, autoClose: false }),
-  extract:  () => ({ varName: '', selector: '', extractType: 'text', attrName: '', multiMode: 'first', joinSep: '\n', waitSec: 5, onMissing: 'stop' }),
-  image:    () => ({ varName: '', selector: '', attrName: 'src', refMode: 'local', onFail: 'stop' }),
-  assemble: () => ({ title: '', template: '# 文章标题\n\n在此编写正文，使用 {{变量名}} 引用前面节点提取的内容。\n' }),
+  extract:  () => ({
+    varName: '', selectorType: 'css', selector: '', extractType: 'text', attrName: '',
+    multiMode: 'first', joinSep: '\n', waitSec: 5, onMissing: 'stop', ...DEFAULT_REGEX(),
+  }),
+  list:     () => ({
+    varName: '', selectorType: 'css', selector: '', extractType: 'text', attrName: '',
+    pagingOn: false, nextSelector: '', nextSelectorType: 'css', maxPages: 5, pageWaitSec: 2,
+    ...DEFAULT_REGEX(),
+  }),
+  image:    () => ({
+    varName: '', sourceMode: 'selector', srcVar: '', selectorType: 'css', selector: '',
+    attrName: 'src', refMode: 'local', onFail: 'stop', ...DEFAULT_REGEX(),
+  }),
+  loop:         () => ({ overVar: '', itemVar: 'item' }),
+  loopEnd:      () => ({}),
+  condition:    () => ({ sourceVar: '', operator: 'notEmpty', compareValue: '' }),
+  conditionEnd: () => ({}),
+  assemble: () => ({
+    title: '',
+    template: '# 文章标题\n\n在此编写正文，使用 {{变量名}} 引用前面节点提取的内容。\n集合变量可用 {{#each 列表名}}…{{/each}}。\n',
+  }),
 };
 
 const VAR_NAME_RE = /^[一-龥A-Za-z0-9_]{1,50}$/;
 const TEMPLATE_REF_RE = /\{\{\s*([^}]+?)\s*\}\}/g;
+const EACH_BLOCK_RE = /\{\{#each\s+([^}]+?)\s*\}\}([\s\S]*?)\{\{\/each\}\}/g;
+const CONDITION_OPS = [
+  ['notEmpty', '不为空'],
+  ['isEmpty', '为空'],
+  ['equals', '等于'],
+  ['notEquals', '不等于'],
+  ['contains', '包含'],
+  ['notContains', '不包含'],
+  ['gt', '大于（数字）'],
+  ['lt', '小于（数字）'],
+];
 
 /* ---------- 状态 ---------- */
 
@@ -41,6 +77,8 @@ let nodeStatus = {};           // nodeId -> idle|running|success|empty|failed|sk
 let invalidIds = new Set();    // 校验失败的节点
 let lastMarkdown = null;
 let lastTitle = '';
+let lastMarkdowns = [];        // 多篇结果（循环内组装会产出多篇）
+let resultIndex = 0;
 
 /* ---------- 工具 ---------- */
 
@@ -62,14 +100,23 @@ function escapeAttr(s) { return escapeHtml(s); }
 
 function displayName(node) {
   const t = NODE_TYPES[node.type];
-  if (node.type === 'extract' || node.type === 'image') {
+  if (node.type === 'extract' || node.type === 'image' || node.type === 'list') {
     return node.config.varName ? `${t.label}：${node.config.varName}` : t.label;
   }
   if (node.type === 'assemble') {
     return node.config.title ? `${t.label}：${node.config.title}` : t.label;
   }
+  if (node.type === 'loop') {
+    return node.config.overVar ? `${t.label}：${node.config.overVar}` : t.label;
+  }
+  if (node.type === 'condition') {
+    return node.config.sourceVar ? `${t.label}：${node.config.sourceVar}` : t.label;
+  }
   return t.label;
 }
+
+const ICON_PLAY = '<svg viewBox="0 0 24 24" width="17" height="17" fill="currentColor"><path d="M8 5.5v13l11-6.5z"/></svg>';
+const ICON_MORE = '<svg viewBox="0 0 24 24" width="17" height="17" fill="currentColor"><circle cx="5" cy="12" r="1.8"/><circle cx="12" cy="12" r="1.8"/><circle cx="19" cy="12" r="1.8"/></svg>';
 
 function sanitizeFilename(name) {
   const cleaned = String(name).replace(/[\\/:*?"<>|]/g, '-').trim();
@@ -91,6 +138,58 @@ function saveState() {
   saveTimer = setTimeout(() => { WCAStore.save(state); }, 300);
 }
 
+/* 立即落盘 */
+async function saveNow() {
+  clearTimeout(saveTimer);
+  if (workflow) workflow.updatedAt = Date.now();
+  await WCAStore.save(state);
+}
+
+/* 相对时间：刚刚 / N 分钟前 / N 小时前 / N 天前 / N 个月前 / N 年前 */
+function relativeTime(ts) {
+  if (!ts) return '—';
+  const diff = Date.now() - ts;
+  const min = 60 * 1000, hour = 60 * min, day = 24 * hour, month = 30 * day, year = 365 * day;
+  if (diff < min) return '刚刚';
+  if (diff < hour) return `${Math.floor(diff / min)} 分钟前`;
+  if (diff < day) return `${Math.floor(diff / hour)} 小时前`;
+  if (diff < month) return `${Math.floor(diff / day)} 天前`;
+  if (diff < year) return `${Math.floor(diff / month)} 个月前`;
+  return `${Math.floor(diff / year)} 年前`;
+}
+
+/* 正则后处理：pattern 非法时抛错 */
+function applyRegex(value, cfg) {
+  if (!cfg || !cfg.regexOn || !cfg.regexPattern) return value;
+  let re;
+  try {
+    re = new RegExp(cfg.regexPattern, cfg.regexFlags || 'g');
+  } catch (e) {
+    throw new Error(`正则表达式非法：${e.message}`);
+  }
+  return String(value).replace(re, cfg.regexRepl == null ? '' : cfg.regexRepl);
+}
+
+/* 渲染模板：支持 {{变量}} 与 {{#each 列表}}…{{/each}}（块内 {{item}} / {{index}}） */
+function renderTemplate(tpl, vars, scope) {
+  let out = String(tpl).replace(EACH_BLOCK_RE, (m, name, inner) => {
+    const arr = vars[name.trim()];
+    if (!Array.isArray(arr)) return '';
+    return arr.map((it, i) => renderTemplate(inner, vars, { item: it, index: i + 1 })).join('\n');
+  });
+  out = out.replace(TEMPLATE_REF_RE, (m, raw) => {
+    const key = raw.trim();
+    if (scope) {
+      if (key === 'item' || key === 'this') return scope.item == null ? '' : String(scope.item);
+      if (key === 'index') return String(scope.index);
+    }
+    if (!Object.prototype.hasOwnProperty.call(vars, key)) return '';
+    const v = vars[key];
+    return Array.isArray(v) ? v.join('\n') : String(v == null ? '' : v);
+  });
+  return out;
+}
+
 /* ---------- 初始化与页面路由 ---------- */
 
 init();
@@ -98,6 +197,7 @@ init();
 async function init() {
   state = await WCAStore.load();
   settings = state.settings;
+  bindImportInput();
 
   const params = new URLSearchParams(location.search);
   const id = params.get('id');
@@ -106,6 +206,10 @@ async function init() {
   if (!wf) { enterHome(); return; }
 
   workflow = wf;
+  // 兼容旧版本保存的节点：补齐新增配置项的默认值
+  workflow.nodes.forEach((n) => {
+    n.config = Object.assign(DEFAULTS[n.type] ? DEFAULTS[n.type]() : {}, n.config || {});
+  });
   ensureOpenTabFirst();
   selectedId = workflow.nodes[0].id;
   resetStatuses();
@@ -138,6 +242,13 @@ function bindHomeUI() {
     await WCAStore.save(state);
     location.href = 'editor.html?id=' + encodeURIComponent(wf.id);
   });
+  $('#homeImportBtn').addEventListener('click', () => importWorkflowFile());
+
+  // 点击空白处收起列表项的下拉菜单
+  document.addEventListener('click', (e) => {
+    if (e.target.closest('.wf-menu') || e.target.closest('[data-op="more"]')) return;
+    document.querySelectorAll('.wf-menu').forEach((m) => m.classList.add('hidden'));
+  });
 }
 
 function renderHome() {
@@ -147,26 +258,41 @@ function renderHome() {
   $('#homeEmpty').classList.toggle('hidden', wfs.length > 0);
 
   wfs.forEach((wf) => {
-    const card = document.createElement('div');
-    card.className = 'wf-card';
-    card.innerHTML = `
-      <div class="wf-info">
+    const row = document.createElement('div');
+    row.className = 'wf-row';
+    row.innerHTML = `
+      <div class="wf-main">
         <div class="wf-name">${escapeHtml(wf.name || '未命名工作流')}</div>
-        <div class="wf-meta">${wf.nodes.length} 个节点 · 更新于 ${formatTime(wf.updatedAt)}</div>
+        <div class="wf-meta">${relativeTime(wf.updatedAt)} · ${wf.nodes.length} 个节点</div>
       </div>
-      <div class="wf-ops">
-        <button class="btn btn-primary" data-op="run">运行</button>
-        <button class="btn" data-op="rename">重命名</button>
-        <button class="btn" data-op="open">编辑</button>
-        <button class="btn danger" data-op="del">删除</button>
+      <button class="wf-icon" data-op="run" title="运行工作流">${ICON_PLAY}</button>
+      <button class="wf-icon" data-op="more" title="更多操作">${ICON_MORE}</button>
+      <div class="wf-menu hidden">
+        <button data-op="rename">重命名</button>
+        <button data-op="del" class="danger">删除</button>
       </div>`;
-    // 点击卡片主体进入编辑
-    card.querySelector('.wf-info').addEventListener('click', () => openWorkflow(wf.id));
-    card.querySelector('[data-op="open"]').addEventListener('click', () => openWorkflow(wf.id));
-    card.querySelector('[data-op="run"]').addEventListener('click', () => openWorkflow(wf.id, true));
-    card.querySelector('[data-op="rename"]').addEventListener('click', () => startRename(card, wf));
-    card.querySelector('[data-op="del"]').addEventListener('click', () => deleteWorkflow(wf));
-    list.appendChild(card);
+
+    row.querySelector('.wf-main').addEventListener('click', () => openWorkflow(wf.id));
+    row.querySelector('[data-op="run"]').addEventListener('click', (e) => {
+      e.stopPropagation();
+      openWorkflow(wf.id, true);
+    });
+    row.querySelector('[data-op="more"]').addEventListener('click', (e) => {
+      e.stopPropagation();
+      const menu = row.querySelector('.wf-menu');
+      const willShow = menu.classList.contains('hidden');
+      document.querySelectorAll('.wf-menu').forEach((m) => m.classList.add('hidden'));
+      menu.classList.toggle('hidden', !willShow);
+    });
+    row.querySelector('[data-op="rename"]').addEventListener('click', () => {
+      row.querySelector('.wf-menu').classList.add('hidden');
+      startRename(row, wf);
+    });
+    row.querySelector('[data-op="del"]').addEventListener('click', () => {
+      row.querySelector('.wf-menu').classList.add('hidden');
+      deleteWorkflow(wf);
+    });
+    list.appendChild(row);
   });
 }
 
@@ -184,6 +310,7 @@ function startRename(card, wf) {
   nameEl.replaceWith(input);
   input.focus();
   input.select();
+  input.addEventListener('click', (e) => e.stopPropagation());   // 避免冒泡触发进入编辑器
 
   let done = false;
   const commit = async (shouldSave) => {
@@ -211,11 +338,109 @@ async function deleteWorkflow(wf) {
   renderHome();
 }
 
-function formatTime(ts) {
-  if (!ts) return '—';
-  return new Date(ts).toLocaleString('zh-CN', {
-    month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false,
-  });
+/* ---------- 文件：保存 / 导入 / 导出 ---------- */
+
+function bindImportInput() {
+  const input = $('#importFile');
+  if (!input) return;
+  input.addEventListener('change', onImportFileChosen);
+}
+
+function importWorkflowFile() {
+  const input = $('#importFile');
+  input.value = '';
+  input.click();
+}
+
+async function onImportFileChosen(e) {
+  const file = e.target.files && e.target.files[0];
+  e.target.value = '';
+  if (!file) return;
+
+  let data;
+  try {
+    data = JSON.parse(await file.text());
+  } catch (err) {
+    alert('导入失败：文件不是合法的 JSON。');
+    return;
+  }
+  const raw = Array.isArray(data) ? data : (Array.isArray(data.workflows) ? data.workflows : (data.nodes ? [data] : []));
+  const added = raw.map(normalizeImported).filter(Boolean);
+  if (!added.length) {
+    alert('导入失败：文件中没有找到有效的工作流。');
+    return;
+  }
+  added.forEach((wf) => state.workflows.push(wf));
+  await WCAStore.save(state);
+
+  if (workflow) {
+    log('success', `已导入 ${added.length} 个工作流：${added.map((w) => w.name).join('、')}。可返回列表页查看。`);
+  } else {
+    renderHome();
+  }
+}
+
+/* 规整导入数据：节点 id 重新生成，配置与默认值合并 */
+function normalizeImported(item) {
+  if (!item || !Array.isArray(item.nodes)) return null;
+  const nodes = item.nodes
+    .filter((n) => n && NODE_TYPES[n.type])
+    .map((n) => ({
+      id: uid(),
+      type: n.type,
+      config: Object.assign(DEFAULTS[n.type](), n.config || {}),
+    }));
+  if (!nodes.length) return null;
+  const openIdx = nodes.findIndex((n) => n.type === 'openTab');
+  if (openIdx === -1) {
+    nodes.unshift({ id: uid(), type: 'openTab', config: DEFAULTS.openTab() });
+  } else if (openIdx > 0) {
+    nodes.unshift(nodes.splice(openIdx, 1)[0]);
+  }
+  return {
+    id: uid('w_'),
+    name: item.name || '导入的工作流',
+    nodes,
+    updatedAt: Date.now(),
+  };
+}
+
+async function handleFileOp(op) {
+  if (op === 'save') {
+    await saveNow();
+    log('success', `已保存工作流「${workflow.name || '未命名工作流'}」。`);
+    switchTab('log');
+  } else if (op === 'exportOne') {
+    exportWorkflows([workflow], `${sanitizeFilename(workflow.name || 'workflow')}.json`);
+  } else if (op === 'exportAll') {
+    if (!state.workflows.length) { log('warn', '暂无工作流可导出。'); switchTab('log'); return; }
+    exportWorkflows(state.workflows, 'topdata-workflows.json');
+  } else if (op === 'import') {
+    importWorkflowFile();
+  }
+}
+
+/* 导出为 JSON：单套（workflow）或多套（bundle） */
+function exportWorkflows(list, filename) {
+  const payload = {
+    app: 'TopData',
+    kind: list.length === 1 ? 'workflow' : 'bundle',
+    version: 1,
+    exportedAt: new Date().toISOString(),
+    workflows: list.map((w) => ({
+      name: w.name || '未命名工作流',
+      updatedAt: w.updatedAt || Date.now(),
+      nodes: w.nodes.map((n) => ({ type: n.type, config: n.config })),
+    })),
+  };
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 5000);
+  log('success', `已导出 ${list.length} 个工作流：${filename}`);
 }
 
 function makeNode(type) {
@@ -267,6 +492,23 @@ function bindEditorUI() {
 
   $('#copyMdBtn').addEventListener('click', copyMarkdown);
   $('#downloadMdBtn').addEventListener('click', downloadMarkdown);
+  $('#downloadAllBtn').addEventListener('click', downloadAllMarkdowns);
+  $('#resultSelect').addEventListener('change', (e) => showResultAt(parseInt(e.target.value, 10) || 0));
+
+  // 文件菜单：保存 / 导入 / 导出
+  $('#fileBtn').addEventListener('click', (e) => {
+    e.stopPropagation();
+    $('#fileMenu').classList.toggle('hidden');
+  });
+  $('#fileMenu').querySelectorAll('[data-op]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      $('#fileMenu').classList.add('hidden');
+      handleFileOp(btn.dataset.op);
+    });
+  });
+  document.addEventListener('click', (e) => {
+    if (!e.target.closest('.file-menu-wrap')) $('#fileMenu').classList.add('hidden');
+  });
 
   // 接收目标页面选择浮层回传的选择器
   chrome.runtime.onMessage.addListener((msg) => {
@@ -275,12 +517,13 @@ function bindEditorUI() {
     const node = getNode(pickNodeId);
     if (msg.selector && node) {
       node.config.selector = msg.selector;
+      if (msg.selectorType) node.config.selectorType = msg.selectorType;
       invalidIds.delete(node.id);
       saveState();
       renderConfigForm();
       renderNodeList();
       switchTab('log');
-      log('success', `已填入选择器：${msg.selector}`);
+      log('success', `已填入选择器（${msg.selectorType === 'xpath' ? 'XPath' : 'CSS'}）：${msg.selector}`);
     } else {
       switchTab('log');
       log('info', '已关闭选择面板，未选择元素。');
@@ -310,6 +553,7 @@ function renderAll() {
 function renderNodeList() {
   const list = $('#nodeList');
   list.innerHTML = '';
+  const depths = computeDepths(workflow.nodes);
   workflow.nodes.forEach((node, i) => {
     if (i > 0) {
       const conn = document.createElement('div');
@@ -317,10 +561,13 @@ function renderNodeList() {
       list.appendChild(conn);
     }
     const t = NODE_TYPES[node.type];
+    const isEnd = !!t.blockEnd;
     const card = document.createElement('div');
     card.className = 'node-card'
+      + (isEnd ? ' block-end' : '')
       + (node.id === selectedId ? ' selected' : '')
       + (invalidIds.has(node.id) ? ' invalid' : '');
+    card.style.marginLeft = `${(depths[node.id] || 0) * 16}px`;
 
     const sub = nodeSubtitle(node);
     card.innerHTML = `
@@ -347,15 +594,62 @@ function renderNodeList() {
   });
 }
 
+/* 计算每个节点的块嵌套深度（结束标记归到外层） */
+function computeDepths(nodes) {
+  const map = {};
+  let d = 0;
+  nodes.forEach((n) => {
+    if (n.type === 'loopEnd' || n.type === 'conditionEnd') {
+      d = Math.max(0, d - 1);
+      map[n.id] = d;
+    } else {
+      map[n.id] = d;
+      if (n.type === 'loop' || n.type === 'condition') d += 1;
+    }
+  });
+  return map;
+}
+
+/* 找到块开始节点对应的结束节点下标 */
+function findBlockEnd(nodes, startIdx) {
+  const start = nodes[startIdx];
+  if (!start || (start.type !== 'loop' && start.type !== 'condition')) return -1;
+  const wantEnd = start.type === 'loop' ? 'loopEnd' : 'conditionEnd';
+  let depth = 0;
+  for (let i = startIdx + 1; i < nodes.length; i++) {
+    const t = nodes[i].type;
+    if (t === start.type) depth += 1;
+    else if (t === wantEnd) {
+      if (depth === 0) return i;
+      depth -= 1;
+    }
+  }
+  return -1;
+}
+
 function nodeSubtitle(node) {
   const c = node.config;
   switch (node.type) {
     case 'openTab': return c.url || '未配置 URL';
-    case 'extract': return c.selector ? `${c.selector} → ${c.extractType === 'attr' ? '@' + (c.attrName || '?') : '文本'}` : '未配置选择器';
-    case 'image':   return c.selector ? `${c.selector} → ${c.refMode === 'url' ? '原始URL' : '本地下载'}` : '未配置选择器';
+    case 'extract': return c.selector ? `${selPrefix(c)}${c.selector} → ${c.extractType === 'attr' ? '@' + (c.attrName || '?') : '文本'}` : '未配置选择器';
+    case 'list':    return c.selector ? `${selPrefix(c)}${c.selector}${c.pagingOn ? ' · 翻页' : ''}` : '未配置选择器';
+    case 'image':   return c.sourceMode === 'var'
+      ? `{{${c.srcVar || '?'}}} → ${c.refMode === 'url' ? '原始URL' : '本地下载'}`
+      : (c.selector ? `${selPrefix(c)}${c.selector} → ${c.refMode === 'url' ? '原始URL' : '本地下载'}` : '未配置选择器');
+    case 'loop':    return c.overVar ? `遍历 {{${c.overVar}}}，当前项 → {{${c.itemVar || 'item'}}}` : '未指定集合变量';
+    case 'condition': return `${c.sourceVar || '?'} ${opLabel(c.operator)}${c.compareValue ? ' ' + c.compareValue : ''}`;
     case 'assemble':return c.title ? `《${c.title}》` : '未配置标题';
     default: return '';
   }
+}
+
+function selPrefix(c) {
+  return c.selectorType === 'xpath' ? 'xpath: ' : '';
+}
+
+function opLabel(op) {
+  const found = CONDITION_OPS.find((o) => o[0] === op);
+  return found ? found[1] : op;
 }
 
 function statusTitle(id) {
@@ -365,13 +659,29 @@ function statusTitle(id) {
 function handleNodeOp(id, op) {
   const idx = workflow.nodes.findIndex((n) => n.id === id);
   if (idx < 0) return;
+  const node = workflow.nodes[idx];
+  const t = NODE_TYPES[node.type];
+
   if (op === 'del') {
-    workflow.nodes.splice(idx, 1);
+    if (t.block) {
+      // 删除块开始节点：连同区间与结束标记一起删除
+      const endIdx = findBlockEnd(workflow.nodes, idx);
+      const count = endIdx > -1 ? endIdx - idx + 1 : 1;
+      const inner = Math.max(0, count - 2);
+      if (!confirm(`删除该${t.label}及其内部 ${inner} 个节点？（此操作不可撤销）`)) return;
+      workflow.nodes.splice(idx, count);
+    } else {
+      workflow.nodes.splice(idx, 1);
+    }
     if (selectedId === id) selectedId = workflow.nodes[Math.max(0, idx - 1)].id;
-  } else if (op === 'up' && idx > 1) {   // 不能越过起始节点（index 0）
-    [workflow.nodes[idx - 1], workflow.nodes[idx]] = [workflow.nodes[idx], workflow.nodes[idx - 1]];
-  } else if (op === 'down' && idx < workflow.nodes.length - 1 && idx >= 1) {
-    [workflow.nodes[idx + 1], workflow.nodes[idx]] = [workflow.nodes[idx], workflow.nodes[idx + 1]];
+  } else if (op === 'up' || op === 'down') {
+    const depths = computeDepths(workflow.nodes);
+    const targetIdx = op === 'up' ? idx - 1 : idx + 1;
+    if (targetIdx < 1 || targetIdx >= workflow.nodes.length) return;   // 不能越过起始节点
+    // 仅允许在同一层级内移动，避免破坏块结构
+    if (depths[node.id] !== depths[workflow.nodes[targetIdx].id]) return;
+    if (NODE_TYPES[workflow.nodes[targetIdx].type].fixed) return;
+    [workflow.nodes[idx], workflow.nodes[targetIdx]] = [workflow.nodes[targetIdx], workflow.nodes[idx]];
   }
   saveState();
   renderNodeList();
@@ -386,7 +696,10 @@ function toggleAddMenu() {
   const hasAssemble = workflow.nodes.some((n) => n.type === 'assemble');
   menu.innerHTML = `
     <button data-type="extract"><span class="node-badge extract">取</span>提取内容<span class="menu-desc">文本 / 属性值</span></button>
+    <button data-type="list"><span class="node-badge list">列</span>批量提取<span class="menu-desc">集合变量 / 翻页</span></button>
     <button data-type="image"><span class="node-badge image">图</span>下载图片<span class="menu-desc">保存到本地</span></button>
+    <button data-type="loop"><span class="node-badge loop">循</span>循环<span class="menu-desc">遍历集合变量</span></button>
+    <button data-type="condition"><span class="node-badge condition">条</span>条件分支<span class="menu-desc">满足才执行内部节点</span></button>
     <button data-type="assemble" ${hasAssemble ? 'disabled' : ''}><span class="node-badge assemble">文</span>文章组装<span class="menu-desc">${hasAssemble ? '已存在（最多一个）' : '生成 Markdown'}</span></button>
   `;
   menu.querySelectorAll('button[data-type]').forEach((btn) => {
@@ -403,8 +716,12 @@ function addNode(type) {
   // 插入到选中节点之后；未选中或选中的是最后一个则追加
   const idx = workflow.nodes.findIndex((n) => n.id === selectedId);
   const pos = idx >= 0 ? idx + 1 : workflow.nodes.length;
-  workflow.nodes.splice(pos, 0, node);
-  nodeStatus[node.id] = 'idle';
+  // 块节点同时插入结束标记，形成空块
+  const items = [node];
+  if (type === 'loop') items.push(makeNode('loopEnd'));
+  if (type === 'condition') items.push(makeNode('conditionEnd'));
+  workflow.nodes.splice(pos, 0, ...items);
+  items.forEach((n) => { nodeStatus[n.id] = 'idle'; });
   selectedId = node.id;
   saveState();
   renderNodeList();
@@ -434,62 +751,120 @@ function renderConfigForm() {
   if (node.type === 'extract') {
     body = `
       ${f('变量名', `<input type="text" data-k="varName" value="${escapeAttr(c.varName)}" placeholder="如：标题、正文、author">`, true, '供文章组装节点以 {{变量名}} 引用。同一工作流内唯一。')}
-      <div class="form-field">
-        <label>CSS 选择器<span class="req">*</span></label>
-        <div class="picker-row">
-          <input type="text" data-k="selector" value="${escapeAttr(c.selector)}" placeholder="如：h1.title  或  .article p">
-          <button class="btn" data-action="pick" title="在当前页面上点击元素，自动生成选择器">选择元素</button>
-        </div>
-        <div class="field-hint">点击“选择元素”后，会在最近浏览的网页上打开选择面板：开启开关、点击目标元素，再点“使用此选择器”回填。</div>
-      </div>
+      ${selectorField(c, '点击“选择元素”会在最近浏览的网页上打开选择面板，可切换 CSS / XPath。')}
       ${f('提取类型', radio('extractType', c.extractType, [['text', '元素文本'], ['attr', '属性值']]), true)}
-      <div class="form-field" data-show="attr" ${c.extractType === 'attr' ? '' : 'hidden'}>
+      <div class="form-field" data-show="extractType" data-value="attr">
         <label>属性名<span class="req">*</span></label>
         <input type="text" data-k="attrName" value="${escapeAttr(c.attrName)}" placeholder="如：href、src、alt、data-id">
         <div class="field-hint">href / src 会自动转为绝对 URL。</div>
       </div>
       ${f('多匹配处理', radio('multiMode', c.multiMode, [['first', '仅第一个'], ['all', '全部（拼接）']]), true)}
-      <div class="form-field" data-show="all" ${c.multiMode === 'all' ? '' : 'hidden'}>
+      <div class="form-field" data-show="multiMode" data-value="all">
         <label>拼接分隔符</label>
         <input type="text" data-k="joinSep" value="${escapeAttr(c.joinSep)}" placeholder="默认换行">
       </div>
       <div class="form-row">
         ${f('等待元素出现（秒）', `<input type="number" data-k="waitSec" min="0" max="60" step="1" value="${c.waitSec}">`, false, '超时时间内持续查找元素，0 表示立即匹配。')}
         ${f('未匹配时', radio('onMissing', c.onMissing, [['stop', '停止并报错'], ['continue', '置空并继续']]), true)}
-      </div>`;
+      </div>
+      ${regexBlock(c)}`;
   }
 
   if (node.type === 'image') {
+    const vars = availableVars();
+    const varOpts = vars.length
+      ? vars.map((v) => `<option value="${escapeAttr(v.name)}" ${c.srcVar === v.name ? 'selected' : ''}>${escapeHtml(v.name)}${v.list ? '（集合）' : ''}</option>`).join('')
+      : '<option value="">（暂无变量）</option>';
     body = `
       ${f('变量名', `<input type="text" data-k="varName" value="${escapeAttr(c.varName)}" placeholder="如：封面图">`, true, '变量值为 Markdown 图片语法可用的引用路径或原始 URL。')}
-      <div class="form-field">
-        <label>CSS 选择器<span class="req">*</span></label>
-        <div class="picker-row">
-          <input type="text" data-k="selector" value="${escapeAttr(c.selector)}" placeholder="如：.cover img">
-          <button class="btn" data-action="pick" title="在当前页面上点击图片元素，自动生成选择器">选择元素</button>
-        </div>
-        <div class="field-hint">建议直接点选页面中的 &lt;img&gt; 元素。</div>
+      ${f('图片来源', radio('sourceMode', c.sourceMode || 'selector', [['selector', '页面元素选择器'], ['var', '变量（图片 URL）']]), true, '选择“变量”并配合循环节点，可把批量提取到的多个图片地址逐一下载。')}
+      <div class="form-field" data-show="sourceMode" data-value="selector">
+        ${selectorField(c, '建议直接选择页面中的 <img> 元素。')}
+        ${f('属性名', `<input type="text" data-k="attrName" value="${escapeAttr(c.attrName)}" placeholder="默认 src">`, false, '取图片地址的属性，默认 src。')}
       </div>
-      ${f('属性名', `<input type="text" data-k="attrName" value="${escapeAttr(c.attrName)}" placeholder="默认 src">`, false, '取图片地址的属性，默认 src。')}
+      <div class="form-field" data-show="sourceMode" data-value="var">
+        <label>图片 URL 变量<span class="req">*</span></label>
+        <select data-k="srcVar">${varOpts}</select>
+        <div class="field-hint">通常选择循环节点的“当前项变量”，从而实现多图批量下载。</div>
+      </div>
       ${f('引用方式', radio('refMode', c.refMode, [['local', '下载到本地（相对路径）'], ['url', '不下载，引用原始 URL']]), true)}
-      ${f('未匹配 / 下载失败时', radio('onFail', c.onFail, [['stop', '停止并报错'], ['continue', '置空并继续']]), true)}`;
+      ${f('未匹配 / 下载失败时', radio('onFail', c.onFail, [['stop', '停止并报错'], ['continue', '置空并继续']]), true)}
+      ${regexBlock(c)}`;
+  }
+
+  if (node.type === 'list') {
+    body = `
+      ${f('集合变量名', `<input type="text" data-k="varName" value="${escapeAttr(c.varName)}" placeholder="如：链接列表">`, true, '产出一个集合变量（数组），供循环节点遍历、文章组装 {{#each}} 渲染。')}
+      ${selectorField(c, '匹配到的全部元素会逐个取值组成集合。')}
+      ${f('提取类型', radio('extractType', c.extractType, [['text', '元素文本'], ['attr', '属性值']]), true)}
+      <div class="form-field" data-show="extractType" data-value="attr">
+        <label>属性名<span class="req">*</span></label>
+        <input type="text" data-k="attrName" value="${escapeAttr(c.attrName)}" placeholder="如：href、src">
+        <div class="field-hint">href / src 会自动转为绝对 URL。</div>
+      </div>
+      <div class="form-field">
+        <label class="switch-field"><input type="checkbox" data-k="pagingOn" ${c.pagingOn ? 'checked' : ''}> 翻页采集（点击“下一页”继续收集）</label>
+        <div class="paging-body" data-show="pagingOn">
+          <div class="form-field">
+            <label>下一页选择器</label>
+            <div class="picker-row">
+              <select class="inline-select" data-k="nextSelectorType">
+                <option value="css" ${c.nextSelectorType !== 'xpath' ? 'selected' : ''}>CSS</option>
+                <option value="xpath" ${c.nextSelectorType === 'xpath' ? 'selected' : ''}>XPath</option>
+              </select>
+              <input type="text" data-k="nextSelector" value="${escapeAttr(c.nextSelector)}" placeholder="如：.pagination .next">
+            </div>
+          </div>
+          <div class="form-row">
+            ${f('最大页数', `<input type="number" data-k="maxPages" min="1" max="100" step="1" value="${c.maxPages}">`)}
+            ${f('每页等待（秒）', `<input type="number" data-k="pageWaitSec" min="1" max="30" step="1" value="${c.pageWaitSec}">`, false, '点击下一页后等待新内容加载。')}
+          </div>
+          <div class="field-hint">仅支持点击后页面不整体跳转的翻页；若翻页会刷新整页，请改用独立工作流。</div>
+        </div>
+      </div>
+      ${regexBlock(c)}`;
+  }
+
+  if (node.type === 'loop') {
+    const listVars = availableVars().filter((v) => v.list);
+    const opts = listVars.length
+      ? listVars.map((v) => `<option value="${escapeAttr(v.name)}" ${c.overVar === v.name ? 'selected' : ''}>${escapeHtml(v.name)}</option>`).join('')
+      : '<option value="">（暂无集合变量）</option>';
+    body = `
+      ${f('遍历集合变量', `<select data-k="overVar">${opts}</select>`, true, '取前面“批量提取”节点产出的集合变量。')}
+      ${f('当前项变量名', `<input type="text" data-k="itemVar" value="${escapeAttr(c.itemVar)}" placeholder="item">`, true, '循环体内用 {{变量名}} 引用当前项。')}
+      <div class="field-hint">循环体 = 本节点与“循环结束”之间的全部节点，按集合项数重复执行。循环体内放“文章组装”可逐条产出多篇 Markdown。</div>`;
+  }
+
+  if (node.type === 'condition') {
+    const vars = availableVars();
+    const opts = vars.length
+      ? vars.map((v) => `<option value="${escapeAttr(v.name)}" ${c.sourceVar === v.name ? 'selected' : ''}>${escapeHtml(v.name)}</option>`).join('')
+      : '<option value="">（暂无变量）</option>';
+    body = `
+      ${f('来源变量', `<select data-k="sourceVar">${opts}</select>`, true, '条件判断所用的变量。')}
+      ${f('判断条件', `<select data-k="operator">${CONDITION_OPS.map(([v, label]) => `<option value="${v}" ${c.operator === v ? 'selected' : ''}>${label}</option>`).join('')}</select>`, true)}
+      <div class="form-field" data-show="operator" data-value="__compare__">
+        <label>比较值</label>
+        <input type="text" data-k="compareValue" value="${escapeAttr(c.compareValue)}" placeholder="用于比较的文本或数字">
+      </div>
+      <div class="field-hint">条件成立时执行“条件分支”与“条件结束”之间的节点；不成立则整段跳过。需要 else 时再加一个取反的条件分支即可。</div>`;
   }
 
   if (node.type === 'assemble') {
-    const vars = workflow.nodes
-      .filter((n) => (n.type === 'extract' || n.type === 'image') && n.config.varName)
-      .map((n) => n.config.varName);
+    const vars = availableVars();
     const chips = vars.length
-      ? vars.map((v) => `<span class="var-chip" data-var="${escapeAttr(v)}">{{${escapeHtml(v)}}}</span>`).join('')
-      : '<span class="field-hint">暂无可引用变量，请先添加“提取内容 / 下载图片”节点并填写变量名。</span>';
+      ? vars.map((v) => `<span class="var-chip" data-var="${escapeAttr(v.name)}">{{${escapeHtml(v.name)}}}${v.list ? '（集合）' : ''}</span>`).join('')
+      : '<span class="field-hint">暂无可引用变量，请先添加“提取内容 / 批量提取 / 下载图片”节点并填写变量名。</span>';
     body = `
-      ${f('文章标题', `<input type="text" data-k="title" value="${escapeAttr(c.title)}" placeholder="下载 .md 时作为文件名">`, true)}
+      ${f('文章标题', `<input type="text" data-k="title" value="${escapeAttr(c.title)}" placeholder="下载 .md 时作为文件名，支持 {{变量}}">`, true)}
       <div class="form-field">
         <label>Markdown 模板<span class="req">*</span></label>
         <textarea data-k="template" id="templateEditor" spellcheck="false">${escapeHtml(c.template)}</textarea>
-        <div class="field-hint">使用 {{变量名}} 引用前面节点的产出，点击下面变量标签可插入到光标处。</div>
+        <div class="field-hint">使用 {{变量名}} 引用变量：集合变量默认按换行展开；也可用 {{#each 集合名}} … {{/each}} 逐项渲染，块内用 {{item}} 与 {{index}}。点击变量标签插入到光标处。</div>
         <div class="var-chips">${chips}</div>
-      </div>`;
+      </div>
+      <div class="field-hint">位于循环体内时，每次循环都会产出一篇独立 Markdown，结果面板可逐篇切换、批量下载。</div>`;
   }
 
   box.innerHTML = `
@@ -513,15 +888,85 @@ function renderConfigForm() {
   box.querySelectorAll('[data-action="pick"]').forEach((btn) => {
     btn.addEventListener('click', () => startPicker(node, btn));
   });
+  applyConditionalFields(node);
+}
+
+/* 字段联动显隐：data-show=<配置键>，data-value 为空表示按真假判断 */
+function applyConditionalFields(node) {
+  $('#configForm').querySelectorAll('[data-show]').forEach((el) => {
+    const key = el.dataset.show;
+    const expect = el.dataset.value || '';
+    const actual = node.config[key];
+    let show;
+    if (expect === '__compare__') show = actual !== 'notEmpty' && actual !== 'isEmpty';
+    else if (expect) show = String(actual) === expect;
+    else show = !!actual;
+    el.hidden = !show;
+    el.style.display = show ? '' : 'none';
+  });
+}
+
+/* 选择器字段：类型（CSS / XPath）+ 输入框 + 选择元素 */
+function selectorField(c, hint) {
+  const isXpath = c.selectorType === 'xpath';
+  return `<div class="form-field">
+    <label>选择器<span class="req">*</span></label>
+    <div class="picker-row">
+      <select class="inline-select" data-k="selectorType">
+        <option value="css" ${isXpath ? '' : 'selected'}>CSS</option>
+        <option value="xpath" ${isXpath ? 'selected' : ''}>XPath</option>
+      </select>
+      <input type="text" data-k="selector" value="${escapeAttr(c.selector)}" placeholder="${isXpath ? '如：//div[@class=&quot;item&quot;]/a' : '如：h1.title  或  .article p'}">
+      <button class="btn" data-action="pick" title="在网页上点选元素，自动生成选择器">选择元素</button>
+    </div>
+    ${hint ? `<div class="field-hint">${hint}</div>` : ''}
+  </div>`;
+}
+
+/* 正则后处理区块 */
+function regexBlock(c) {
+  return `<div class="form-field">
+    <label class="switch-field"><input type="checkbox" data-k="regexOn" ${c.regexOn ? 'checked' : ''}> 正则后处理</label>
+    <div class="regex-body" data-show="regexOn">
+      <input type="text" data-k="regexPattern" value="${escapeAttr(c.regexPattern)}" placeholder="正则表达式，如：^\\s*作者[:：]\\s*(.*)$">
+      <div class="form-row">
+        ${f('标志', `<select data-k="regexFlags">
+          <option value="g" ${c.regexFlags === 'g' ? 'selected' : ''}>g（全局）</option>
+          <option value="gi" ${c.regexFlags === 'gi' ? 'selected' : ''}>gi（+忽略大小写）</option>
+          <option value="gm" ${c.regexFlags === 'gm' ? 'selected' : ''}>gm（+多行）</option>
+          <option value="gim" ${c.regexFlags === 'gim' ? 'selected' : ''}>gim（+忽略大小写+多行）</option>
+        </select>`)}
+        ${f('替换为', `<input type="text" data-k="regexRepl" value="${escapeAttr(c.regexRepl)}" placeholder="$1，留空表示删除匹配内容">`)}
+      </div>
+      <div class="field-hint">对提取到的文本执行正则替换；三个组都可留空，表示不做处理。</div>
+    </div>
+  </div>`;
+}
+
+/* 当前工作流中可引用的变量 */
+function availableVars() {
+  const out = [];
+  workflow.nodes.forEach((n) => {
+    const v = n.config && n.config.varName;
+    if (n.type === 'list' && v) out.push({ name: v, list: true });
+    else if ((n.type === 'extract' || n.type === 'image') && v) out.push({ name: v, list: false });
+    else if (n.type === 'loop' && n.config.itemVar) out.push({ name: n.config.itemVar, list: false });
+  });
+  return out;
 }
 
 function nodeDesc(type) {
   return {
     openTab: '起始节点：指定采集目标页面，每个工作流有且仅有一个。',
-    extract: '按 CSS 选择器提取元素文本或属性值，产出命名变量。',
-    image: '下载页面中的图片到本地，产出可用于 Markdown 的引用变量。',
-    assemble: '用前面节点的变量组装 Markdown 短文（每个工作流最多一个）。',
-  }[type];
+    extract: '按 CSS / XPath 选择器提取元素文本或属性值，产出命名变量。',
+    list: '批量提取：把匹配到的全部元素取值组成集合变量，可翻页累积。',
+    image: '下载图片到本地，产出可用于 Markdown 的引用变量；也可引用图片 URL 变量配合循环批量下载。',
+    loop: '循环开始：遍历集合变量，重复执行区间内的节点。',
+    loopEnd: '循环结束标记：与“循环开始”配对，节点不可单独删除或移动。',
+    condition: '条件分支：判断成立时执行区间内节点，不成立则整段跳过。',
+    conditionEnd: '条件结束标记：与“条件分支”配对，节点不可单独删除或移动。',
+    assemble: '用前面节点的变量组装 Markdown（每个工作流最多一个）。',
+  }[type] || '';
 }
 
 function f(label, input, required, hint) {
@@ -543,13 +988,7 @@ function updateConfig(node, el) {
   node.config[key] = val;
 
   // 联动显示
-  if (node.type === 'extract' && (key === 'extractType' || key === 'multiMode')) {
-    const box = $('#configForm');
-    const attrField = box.querySelector('[data-show="attr"]');
-    const allField = box.querySelector('[data-show="all"]');
-    if (attrField) attrField.hidden = node.config.extractType !== 'attr';
-    if (allField) allField.hidden = node.config.multiMode !== 'all';
-  }
+  applyConditionalFields(node);
   invalidIds.delete(node.id);
   saveState();
   renderNodeList();
@@ -613,12 +1052,36 @@ function showOutputs(outputs) {
   });
 }
 
-function showResult(markdown, title) {
-  lastMarkdown = markdown;
-  lastTitle = title;
-  $('#mdSource').value = markdown;
-  $('#mdPreview').innerHTML = renderMarkdown(markdown);
-  $('#resultHint').textContent = `《${title}》 共 ${markdown.length} 字符`;
+function showResults(markdowns) {
+  lastMarkdowns = markdowns.slice();
+  resultIndex = 0;
+  const sel = $('#resultSelect');
+  const allBtn = $('#downloadAllBtn');
+  if (markdowns.length > 1) {
+    sel.innerHTML = markdowns
+      .map((m, i) => `<option value="${i}">${escapeHtml(m.title)}</option>`)
+      .join('');
+    sel.classList.remove('hidden');
+    allBtn.classList.remove('hidden');
+  } else {
+    sel.classList.add('hidden');
+    allBtn.classList.add('hidden');
+  }
+  showResultAt(0);
+}
+
+function showResultAt(index) {
+  const item = lastMarkdowns[index];
+  if (!item) return;
+  resultIndex = index;
+  lastMarkdown = item.markdown;
+  lastTitle = item.title;
+  $('#mdSource').value = item.markdown;
+  $('#mdPreview').innerHTML = renderMarkdown(item.markdown);
+  const sel = $('#resultSelect');
+  if (sel.value !== String(index)) sel.value = String(index);
+  const pageInfo = lastMarkdowns.length > 1 ? ` · 第 ${index + 1}/${lastMarkdowns.length} 篇` : '';
+  $('#resultHint').textContent = `《${item.title}》 共 ${item.markdown.length} 字符${pageInfo}`;
   switchTab('result');
 }
 
@@ -640,14 +1103,27 @@ async function copyMarkdown() {
 
 function downloadMarkdown() {
   if (!lastMarkdown) { log('warn', '暂无可下载的 Markdown，请先成功运行含文章组装节点的流程。'); return; }
-  const blob = new Blob([lastMarkdown], { type: 'text/markdown;charset=utf-8' });
+  downloadOne(lastMarkdowns[resultIndex] || { title: lastTitle, markdown: lastMarkdown });
+}
+
+async function downloadAllMarkdowns() {
+  if (!lastMarkdowns.length) return;
+  for (let i = 0; i < lastMarkdowns.length; i++) {
+    downloadOne(lastMarkdowns[i]);
+    await sleep(300);   // 避免浏览器连续下载被拦截
+  }
+  log('success', `已开始下载全部 ${lastMarkdowns.length} 篇 Markdown。`);
+}
+
+function downloadOne(item) {
+  const blob = new Blob([item.markdown], { type: 'text/markdown;charset=utf-8' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
-  a.download = `${sanitizeFilename(lastTitle)}.md`;
+  a.download = `${sanitizeFilename(item.title)}.md`;
   a.click();
   setTimeout(() => URL.revokeObjectURL(url), 5000);
-  log('success', `已下载 ${sanitizeFilename(lastTitle)}.md`);
+  log('success', `已下载 ${sanitizeFilename(item.title)}.md`);
 }
 
 /* ============================================================
@@ -656,45 +1132,160 @@ function downloadMarkdown() {
 
 function validateWorkflow() {
   const errs = [];
-  const vars = new Set();
+  const defs = new Map(); // 变量名 -> { list, nodeId }
 
   // 第一轮：收集全部变量名（与节点顺序无关）
   workflow.nodes.forEach((n) => {
-    if ((n.type === 'extract' || n.type === 'image') && (n.config.varName || '').trim()) {
-      vars.add(n.config.varName.trim());
+    const v = (n.config && n.config.varName || '').trim();
+    if ((n.type === 'extract' || n.type === 'image' || n.type === 'list') && v) {
+      defs.set(v, { list: n.type === 'list', nodeId: n.id });
     }
+    const iv = (n.type === 'loop' && (n.config.itemVar || '').trim()) || '';
+    if (iv) defs.set(iv, { list: false, nodeId: n.id });
   });
+  const vars = new Set(defs.keys());
 
   // 第二轮：逐项校验
   workflow.nodes.forEach((n) => {
     const dn = displayName(n);
+    const c = n.config || {};
+
     if (n.type === 'openTab') {
-      if (!/^https?:\/\/\S+/i.test((n.config.url || '').trim())) {
+      if (!/^https?:\/\/\S+/i.test((c.url || '').trim())) {
         errs.push({ id: n.id, msg: '起始节点：URL 为空或非法（仅支持 http/https）' });
       }
     }
-    if (n.type === 'extract' || n.type === 'image') {
-      const vn = (n.config.varName || '').trim();
+
+    if (n.type === 'extract' || n.type === 'image' || n.type === 'list') {
+      const vn = (c.varName || '').trim();
+      const imageVarMode = n.type === 'image' && (c.sourceMode || 'selector') === 'var';
       if (!vn) errs.push({ id: n.id, msg: `${dn}：变量名必填` });
       else if (!VAR_NAME_RE.test(vn)) errs.push({ id: n.id, msg: `${dn}：变量名「${vn}」含非法字符（允许中文、字母、数字、下划线，≤50 字）` });
-      else if (workflow.nodes.filter((m) => (m.type === 'extract' || m.type === 'image') && (m.config.varName || '').trim() === vn).length > 1) {
+      else if (workflow.nodes.filter((m) => ['extract', 'image', 'list'].includes(m.type) && (m.config.varName || '').trim() === vn).length > 1) {
         errs.push({ id: n.id, msg: `变量名「${vn}」重复` });
       }
-      if (!(n.config.selector || '').trim()) errs.push({ id: n.id, msg: `${dn}：CSS 选择器必填` });
-      if (n.type === 'extract' && n.config.extractType === 'attr' && !(n.config.attrName || '').trim()) {
+      if (!imageVarMode && !(c.selector || '').trim()) errs.push({ id: n.id, msg: `${dn}：选择器必填` });
+      if ((n.type === 'extract' || n.type === 'list') && c.extractType === 'attr' && !(c.attrName || '').trim()) {
         errs.push({ id: n.id, msg: `${dn}：提取属性值时属性名必填` });
       }
+      if (imageVarMode) {
+        const sv = (c.srcVar || '').trim();
+        if (!sv) errs.push({ id: n.id, msg: `${dn}：图片来源为变量时，必须选择图片 URL 变量` });
+        else if (!vars.has(sv)) errs.push({ id: n.id, msg: `${dn}：变量「${sv}」未定义` });
+      }
+      if (n.type === 'image' && !imageVarMode && !(c.attrName || '').trim()) {
+        errs.push({ id: n.id, msg: `${dn}：图片属性名必填` });
+      }
+      if (n.type === 'list' && c.pagingOn && !(c.nextSelector || '').trim()) {
+        errs.push({ id: n.id, msg: `${dn}：开启翻页后必须填写下一页选择器` });
+      }
+      if (c.regexOn) {
+        if (!(c.regexPattern || '').trim()) errs.push({ id: n.id, msg: `${dn}：已开启正则后处理，但正则表达式为空` });
+        else {
+          try { new RegExp(c.regexPattern, c.regexFlags || 'g'); }
+          catch (e) { errs.push({ id: n.id, msg: `${dn}：正则表达式非法（${e.message}）` }); }
+        }
+      }
     }
+
+    if (n.type === 'loop') {
+      const over = (c.overVar || '').trim();
+      const iv = (c.itemVar || '').trim();
+      if (!over) errs.push({ id: n.id, msg: `${dn}：未指定遍历的集合变量` });
+      else if (!defs.has(over) || !defs.get(over).list) errs.push({ id: n.id, msg: `${dn}：集合变量「${over}」不存在或不是批量提取产出` });
+      if (!iv) errs.push({ id: n.id, msg: `${dn}：当前项变量名必填` });
+      else if (!VAR_NAME_RE.test(iv)) errs.push({ id: n.id, msg: `${dn}：当前项变量名「${iv}」含非法字符` });
+    }
+
+    if (n.type === 'condition') {
+      const src = (c.sourceVar || '').trim();
+      if (!src) errs.push({ id: n.id, msg: `${dn}：未指定来源变量` });
+      else if (!vars.has(src)) errs.push({ id: n.id, msg: `${dn}：来源变量「${src}」未定义` });
+      if (c.operator !== 'notEmpty' && c.operator !== 'isEmpty' && !(c.compareValue || '').trim()) {
+        errs.push({ id: n.id, msg: `${dn}：当前判断条件需要填写比较值` });
+      }
+    }
+
     if (n.type === 'assemble') {
-      if (!(n.config.title || '').trim()) errs.push({ id: n.id, msg: '文章组装：文章标题必填' });
-      if (!(n.config.template || '').trim()) errs.push({ id: n.id, msg: '文章组装：Markdown 模板必填' });
-      const refs = [...(n.config.template || '').matchAll(TEMPLATE_REF_RE)].map((m) => m[1].trim());
+      if (!(c.title || '').trim()) errs.push({ id: n.id, msg: '文章组装：文章标题必填' });
+      if (!(c.template || '').trim()) errs.push({ id: n.id, msg: '文章组装：Markdown 模板必填' });
+      const refs = [...(c.template || '').matchAll(TEMPLATE_REF_RE)]
+        .map((m) => m[1].trim())
+        .filter((r) => r && !['item', 'index', 'this'].includes(r) && !r.startsWith('#each') && !r.startsWith('/each'));
       const undef = [...new Set(refs.filter((r) => !vars.has(r)))];
       if (undef.length) errs.push({ id: n.id, msg: `文章组装：模板引用了未定义变量：${undef.join('、')}` });
+      // each 块中的集合变量需真实存在
+      const eachNames = [...(c.template || '').matchAll(/\{\{#each\s+([^}]+?)\s*\}\}/g)].map((m) => m[1].trim());
+      eachNames.forEach((name) => {
+        if (!defs.has(name) || !defs.get(name).list) {
+          errs.push({ id: n.id, msg: `文章组装：#each 引用的「${name}」不是集合变量` });
+        }
+      });
     }
   });
 
+  validateBlocks(errs);
   return errs;
+}
+
+/* 块配对完整性校验 */
+function validateBlocks(errs) {
+  const stack = [];
+  workflow.nodes.forEach((n) => {
+    if (n.type === 'loop' || n.type === 'condition') {
+      stack.push(n);
+    } else if (n.type === 'loopEnd' || n.type === 'conditionEnd') {
+      const want = n.type === 'loopEnd' ? 'loop' : 'condition';
+      const top = stack[stack.length - 1];
+      if (!top) {
+        errs.push({ id: n.id, msg: `${NODE_TYPES[n.type].label}：缺少配对的开始节点` });
+      } else if (top.type !== want) {
+        errs.push({ id: n.id, msg: `${NODE_TYPES[n.type].label}：与「${NODE_TYPES[top.type].label}」嵌套顺序不匹配` });
+        stack.pop();
+      } else {
+        stack.pop();
+      }
+    }
+  });
+  stack.forEach((n) => errs.push({ id: n.id, msg: `${NODE_TYPES[n.type].label}：缺少对应的结束节点` }));
+}
+
+/* 区间配对：开始节点 id -> 结束节点下标 */
+function buildPairs(nodes) {
+  const pairs = new Map();
+  const stack = [];
+  nodes.forEach((n, i) => {
+    if (n.type === 'loop' || n.type === 'condition') {
+      stack.push({ type: n.type, id: n.id });
+    } else if (n.type === 'loopEnd' || n.type === 'conditionEnd') {
+      const want = n.type === 'loopEnd' ? 'loop' : 'condition';
+      const top = stack[stack.length - 1];
+      if (top && top.type === want) {
+        stack.pop();
+        pairs.set(top.id, i);
+      }
+    }
+  });
+  return pairs;
+}
+
+/* 条件求值 */
+function evalCondition(node, ctx) {
+  const c = node.config;
+  const raw = ctx.vars[c.sourceVar];
+  const val = Array.isArray(raw) ? raw.join('\n') : (raw == null ? '' : String(raw));
+  const cmp = c.compareValue == null ? '' : String(c.compareValue);
+  switch (c.operator) {
+    case 'isEmpty': return val.trim() === '';
+    case 'notEmpty': return val.trim() !== '';
+    case 'equals': return val.trim() === cmp.trim();
+    case 'notEquals': return val.trim() !== cmp.trim();
+    case 'contains': return val.includes(cmp);
+    case 'notContains': return !val.includes(cmp);
+    case 'gt': return parseFloat(val) > parseFloat(cmp);
+    case 'lt': return parseFloat(val) < parseFloat(cmp);
+    default: return false;
+  }
 }
 
 async function runWorkflow() {
@@ -716,27 +1307,20 @@ async function runWorkflow() {
   resetStatuses();
   $('#logList').innerHTML = '';
   lastMarkdown = null;
+  lastMarkdowns = [];
+  resultIndex = 0;
   renderNodeList();
   switchTab('log');
 
-  const ctx = { tabId: null, vars: {}, outputs: [], imgSeq: 0, markdown: null, title: '' };
+  const ctx = {
+    tabId: null, vars: {}, outputs: [], imgSeq: 0,
+    markdown: null, title: '', markdowns: [], loopScope: null,
+  };
+  const pairs = buildPairs(workflow.nodes);
   log('info', '开始运行工作流…');
 
   try {
-    for (let i = 0; i < workflow.nodes.length; i++) {
-      const node = workflow.nodes[i];
-      setStatus(node.id, 'running');
-      log('info', `执行节点：${displayName(node)}`);
-      try {
-        await runNode(node, ctx);
-      } catch (err) {
-        setStatus(node.id, 'failed');
-        log('error', `[${displayName(node)}] ${err.message}`);
-        workflow.nodes.slice(i + 1).forEach((n) => setStatus(n.id, 'skipped'));
-        log('error', '流程已终止。修正配置后可重新运行。');
-        return;
-      }
-    }
+    await execRange(0, workflow.nodes.length, ctx, pairs);
     // 全部成功：按需自动关闭目标标签页
     if (ctx.autoClose && ctx.tabId != null) {
       try { await chrome.tabs.remove(ctx.tabId); log('info', '已按配置自动关闭目标标签页。'); }
@@ -744,12 +1328,21 @@ async function runWorkflow() {
     }
     log('success', '工作流执行完成。');
     showOutputs(ctx.outputs);
-    if (ctx.markdown != null) {
-      showResult(ctx.markdown, ctx.title);
+    if (ctx.markdowns.length) {
+      showResults(ctx.markdowns);
+      if (ctx.markdowns.length > 1) log('success', `共生成 ${ctx.markdowns.length} 篇 Markdown，可在结果面板切换或批量下载。`);
     } else {
       switchTab('output');
       log('info', '流程中没有文章组装节点，仅展示各节点输出。');
     }
+  } catch (err) {
+    switchTab('log');
+    log('error', `[${err.nodeName || '流程'}] ${err.message}`);
+    workflow.nodes.forEach((n) => {
+      const s = nodeStatus[n.id];
+      if (!s || s === 'running' || s === 'idle') nodeStatus[n.id] = 'skipped';
+    });
+    log('error', '流程已终止。修正配置后可重新运行。');
   } finally {
     running = false;
     document.body.classList.remove('running');
@@ -757,6 +1350,71 @@ async function runWorkflow() {
     $('#runBtn').textContent = '运行';
     renderNodeList();
   }
+}
+
+/* 区间执行：支持循环、条件跳过 */
+async function execRange(from, to, ctx, pairs) {
+  let i = from;
+  while (i < to) {
+    const node = workflow.nodes[i];
+
+    if (node.type === 'loop') {
+      const end = pairs.get(node.id);
+      const items = ctx.vars[node.config.overVar];
+      if (!Array.isArray(items)) throw makeNodeError(node, `集合变量「${node.config.overVar}」不存在或不是集合`);
+      setStatus(node.id, 'success');
+      log('info', `循环「${node.config.overVar}」共 ${items.length} 项，开始遍历。`);
+      if (!items.length) log('warn', '集合为空，循环体不会执行。');
+      for (let k = 0; k < items.length; k++) {
+        ctx.vars[node.config.itemVar] = items[k];
+        ctx.loopScope = { index: k + 1, item: items[k] };
+        log('info', `· 第 ${k + 1}/${items.length} 项：${preview(items[k])}`);
+        await execRange(i + 1, end, ctx, pairs);
+      }
+      ctx.vars[node.config.itemVar] = '';
+      ctx.loopScope = null;
+      setStatus(workflow.nodes[end].id, 'success');
+      i = end + 1;
+      continue;
+    }
+
+    if (node.type === 'condition') {
+      const end = pairs.get(node.id);
+      let ok = false;
+      try { ok = evalCondition(node, ctx); }
+      catch (e) { throw makeNodeError(node, e.message); }
+      setStatus(node.id, ok ? 'success' : 'skipped');
+      log(ok ? 'success' : 'info', `条件判断：${nodeSubtitle(node)} → ${ok ? '成立，执行分支' : '不成立，跳过分支'}`);
+      if (ok) {
+        await execRange(i + 1, end, ctx, pairs);
+      } else {
+        for (let k = i + 1; k < end; k++) setStatus(workflow.nodes[k].id, 'skipped');
+      }
+      setStatus(workflow.nodes[end].id, ok ? 'success' : 'skipped');
+      i = end + 1;
+      continue;
+    }
+
+    if (node.type === 'loopEnd' || node.type === 'conditionEnd') { i += 1; continue; }
+
+    setStatus(node.id, 'running');
+    log('info', `执行节点：${displayName(node)}`);
+    try {
+      await runNode(node, ctx);
+    } catch (err) {
+      setStatus(node.id, 'failed');
+      err.nodeName = err.nodeName || displayName(node);
+      throw err;
+    }
+    i += 1;
+  }
+}
+
+function makeNodeError(node, msg) {
+  const e = new Error(msg);
+  e.nodeId = node.id;
+  e.nodeName = displayName(node);
+  return e;
 }
 
 function setStatus(id, status) {
@@ -774,6 +1432,7 @@ async function runNode(node, ctx) {
     }
     case 'extract': {
       const value = await execExtractLike(node, ctx, {
+        selectorType: node.config.selectorType || 'css',
         extractType: node.config.extractType,
         attrName: node.config.attrName,
         multiMode: node.config.multiMode,
@@ -786,6 +1445,14 @@ async function runNode(node, ctx) {
       log(value === '' ? 'warn' : 'success', `变量 {{${node.config.varName}}} = ${preview(value)}`);
       break;
     }
+    case 'list': {
+      const values = await execList(node, ctx);
+      ctx.vars[node.config.varName] = values;
+      ctx.outputs.push({ name: `${node.config.varName}（${values.length} 项）`, value: values.join('\n') });
+      setStatus(node.id, values.length ? 'success' : 'empty');
+      log(values.length ? 'success' : 'warn', `集合 {{${node.config.varName}}} 共 ${values.length} 项`);
+      break;
+    }
     case 'image': {
       const value = await execImage(node, ctx);
       ctx.vars[node.config.varName] = value;
@@ -795,13 +1462,14 @@ async function runNode(node, ctx) {
       break;
     }
     case 'assemble': {
-      ctx.title = sanitizeFilename(node.config.title);
-      ctx.markdown = (node.config.template || '').replace(TEMPLATE_REF_RE, (m, name) => {
-        const key = name.trim();
-        return Object.prototype.hasOwnProperty.call(ctx.vars, key) ? ctx.vars[key] : '';
-      });
-      setStatus(node.id, 'success');
-      log('success', `文章组装完成，共 ${ctx.markdown.length} 字符。`);
+      const titleRaw = renderTemplate(node.config.title || '', ctx.vars, ctx.loopScope).trim();
+      const title = sanitizeFilename(titleRaw || '未命名文章');
+      const markdown = renderTemplate(node.config.template || '', ctx.vars, ctx.loopScope);
+      ctx.title = title;
+      ctx.markdown = markdown;
+      ctx.markdowns.push({ title, markdown });
+      setStatus(node.id, markdown.trim() ? 'success' : 'empty');
+      log('success', `文章组装完成：${title}，共 ${markdown.length} 字符。`);
       break;
     }
   }
@@ -887,6 +1555,7 @@ async function execExtractLike(node, ctx, opts) {
       func: pageExtract,
       args: [{
         selector: cfg.selector,
+        selectorType: opts.selectorType || 'css',
         extractType: opts.extractType,
         attrName: opts.attrName || 'src',
         multiMode: opts.multiMode || 'first',
@@ -907,23 +1576,38 @@ async function execExtractLike(node, ctx, opts) {
     }
     throw new Error(r.error);
   }
-  return r.value;
+  // 正则后处理
+  try {
+    return applyRegex(r.value, cfg);
+  } catch (e) {
+    throw makeNodeError(node, e.message);
+  }
 }
 
 /* 注入目标页面执行的提取函数（必须自包含，不能引用外部变量） */
 function pageExtract(cfg) {
-  function readVals() {
-    const els = document.querySelectorAll(cfg.selector); // 语法错误会抛异常
-    return Array.from(els).map((el) => {
-      if (cfg.extractType === 'attr') {
-        let v = el.getAttribute(cfg.attrName);
-        if (v && /^(href|src)$/i.test(cfg.attrName)) {
-          try { v = new URL(v, location.href).href; } catch (e) { /* 保留原值 */ }
-        }
-        return v == null ? '' : v.trim();
+  function queryAll() {
+    if (cfg.selectorType === 'xpath') {
+      const snap = document.evaluate(cfg.selector, document, null, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null);
+      const out = [];
+      for (let i = 0; i < snap.snapshotLength; i++) out.push(snap.snapshotItem(i));
+      return out;
+    }
+    return Array.from(document.querySelectorAll(cfg.selector)); // 语法错误会抛异常
+  }
+
+  function pick(node) {
+    if (!node) return '';
+    if (cfg.extractType === 'attr') {
+      if (node.nodeType !== 1) return '';
+      let v = node.getAttribute(cfg.attrName);
+      if (v && /^(href|src)$/i.test(cfg.attrName)) {
+        try { v = new URL(v, location.href).href; } catch (e) { /* 保留原值 */ }
       }
-      return (el.innerText || '').replace(/\s+/g, ' ').trim();
-    });
+      return v == null ? '' : v.trim();
+    }
+    const text = node.nodeType === 1 ? (node.innerText || node.textContent || '') : (node.nodeValue || '');
+    return String(text).replace(/\s+/g, ' ').trim();
   }
 
   return new Promise((resolve) => {
@@ -931,9 +1615,9 @@ function pageExtract(cfg) {
     (function attempt() {
       let vals;
       try {
-        vals = readVals();
+        vals = queryAll().map(pick);
       } catch (e) {
-        resolve({ ok: false, error: 'CSS 选择器语法错误：' + e.message });
+        resolve({ ok: false, error: `${cfg.selectorType === 'xpath' ? 'XPath' : 'CSS'} 选择器语法错误：` + e.message });
         return;
       }
       if (vals.length > 0) {
@@ -955,17 +1639,121 @@ function pageExtract(cfg) {
   });
 }
 
+/* ----- 批量提取：收集全部匹配项，可翻页累积 ----- */
+
+async function execList(node, ctx) {
+  await ensureTabAlive(ctx.tabId);
+  const cfg = node.config;
+  const maxPages = cfg.pagingOn ? Math.max(1, cfg.maxPages || 1) : 1;
+  const seen = new Set();
+  const values = [];
+
+  for (let page = 1; page <= maxPages; page++) {
+    if (page > 1) await sleep(Math.max(1, cfg.pageWaitSec || 2) * 1000);
+
+    let r;
+    try {
+      const results = await chrome.scripting.executeScript({
+        target: { tabId: ctx.tabId },
+        func: pageExtractList,
+        args: [{
+          selector: cfg.selector,
+          selectorType: cfg.selectorType || 'css',
+          extractType: cfg.extractType,
+          attrName: cfg.attrName || '',
+          pagingOn: !!cfg.pagingOn,
+          nextSelector: cfg.nextSelector || '',
+          nextSelectorType: cfg.nextSelectorType || 'css',
+        }],
+      });
+      r = results && results[0] && results[0].result;
+    } catch (e) {
+      throw makeNodeError(node, '无法在目标页面执行脚本：' + e.message);
+    }
+    if (!r) throw makeNodeError(node, '页面脚本无返回结果');
+    if (!r.ok) throw makeNodeError(node, r.error);
+
+    let added = 0;
+    r.values.forEach((raw) => {
+      let v;
+      try { v = applyRegex(raw, cfg); } catch (e) { throw makeNodeError(node, e.message); }
+      if (v === '' || seen.has(v)) return;
+      seen.add(v);
+      values.push(v);
+      added += 1;
+    });
+
+    if (!cfg.pagingOn) break;
+    if (!r.clicked) {
+      if (page === 1) log('warn', `未找到可点击的下一页元素：${cfg.nextSelector || '（未填写）'}`);
+      else log('info', `第 ${page} 页后没有更多可翻页元素，翻页结束。`);
+      break;
+    }
+    log('info', `已收集第 ${page} 页，新增 ${added} 项，累计 ${values.length} 项。`);
+  }
+
+  if (!values.length) log('warn', `选择器无匹配元素：${cfg.selector}`);
+  return values;
+}
+
+/* 注入目标页面：收集本页全部匹配值；翻页开启时点击"下一页" */
+function pageExtractList(cfg) {
+  function queryAll(sel, type) {
+    if (type === 'xpath') {
+      const snap = document.evaluate(sel, document, null, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null);
+      const out = [];
+      for (let i = 0; i < snap.snapshotLength; i++) out.push(snap.snapshotItem(i));
+      return out.filter((n) => n && n.nodeType === 1);
+    }
+    return Array.from(document.querySelectorAll(sel));
+  }
+
+  function pick(el) {
+    if (cfg.extractType === 'attr') {
+      let v = el.getAttribute(cfg.attrName);
+      if (v && /^(href|src)$/i.test(cfg.attrName)) {
+        try { v = new URL(v, location.href).href; } catch (e) { /* 保留原值 */ }
+      }
+      return (v == null ? '' : v).trim();
+    }
+    return (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim();
+  }
+
+  try {
+    const values = queryAll(cfg.selector, cfg.selectorType).map(pick).filter((v) => v !== '');
+    let clicked = false;
+    if (cfg.pagingOn && values.length) {
+      const next = queryAll(cfg.nextSelector, cfg.nextSelectorType)[0];
+      if (next && !next.disabled && next.getAttribute('aria-disabled') !== 'true') {
+        next.click();
+        clicked = true;
+      }
+    }
+    return { ok: true, values, clicked };
+  } catch (e) {
+    return { ok: false, error: `${cfg.selectorType === 'xpath' ? 'XPath' : 'CSS'} 选择器语法错误：` + e.message };
+  }
+}
+
 /* ----- 下载图片 ----- */
 
 async function execImage(node, ctx) {
   const cfg = node.config;
-  // 1. 提取图片 URL（固定等待 5 秒，取第一个匹配）
-  const url = await execExtractLike(node, ctx, {
-    extractType: 'attr',
-    attrName: cfg.attrName || 'src',
-    multiMode: 'first',
-    waitMs: 5000,
-  });
+  // 1. 取得图片 URL：来自选择器，或来自变量（配合循环实现批量下载）
+  let url;
+  if ((cfg.sourceMode || 'selector') === 'var') {
+    const raw = ctx.vars[cfg.srcVar];
+    url = Array.isArray(raw) ? (raw[0] || '') : (raw == null ? '' : String(raw));
+    try { url = applyRegex(url, cfg); } catch (e) { throw makeNodeError(node, e.message); }
+  } else {
+    url = await execExtractLike(node, ctx, {
+      selectorType: cfg.selectorType || 'css',
+      extractType: 'attr',
+      attrName: cfg.attrName || 'src',
+      multiMode: 'first',
+      waitMs: 5000,
+    });
+  }
   if (!url) {
     if (cfg.onFail === 'continue') return '';
     throw new Error('图片地址为空');
@@ -1076,7 +1864,7 @@ async function startPicker(node, btn) {
     await chrome.scripting.executeScript({
       target: { tabId: tab.id },
       func: wcaInspector,
-      args: [{ mode: 'pick', requestId: pickRequestId }],
+      args: [{ mode: 'pick', requestId: pickRequestId, selectorType: node.config.selectorType || 'css' }],
     });
     // 切到目标页，让用户看到浮层
     await chrome.tabs.update(tab.id, { active: true });

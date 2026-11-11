@@ -77,6 +77,12 @@ function wcaInspector(opts) {
     .x:hover { background: #f3f4f6; color: #111827; }
 
     .row { display: flex; align-items: center; gap: 6px; padding: 0 12px 10px; flex: 0 0 auto; }
+    .stype {
+      flex: 0 0 auto; height: 32px; border: 0; border-radius: 9px;
+      background: #f3f4f6; color: #374151; font-size: 12px;
+      padding: 0 4px 0 7px; outline: none; cursor: pointer;
+      font-family: inherit;
+    }
     .selwrap {
       flex: 1 1 auto; min-width: 0; display: flex; align-items: center; gap: 6px;
       background: #f3f4f6; border-radius: 9px; padding: 7px 9px;
@@ -153,6 +159,10 @@ function wcaInspector(opts) {
       <button class="x" title="关闭">×</button>
     </div>
     <div class="row">
+      <select class="stype" title="选择器类型">
+        <option value="css">CSS</option>
+        <option value="xpath">XPath</option>
+      </select>
       <div class="selwrap">
         <button class="ic sm copy" data-copy="selector" title="复制选择器">${COPY_SVG}</button>
         <input class="sel" readonly placeholder="尚未选择元素">
@@ -179,6 +189,7 @@ function wcaInspector(opts) {
   /* ---------- 元素引用 ---------- */
 
   const elToggle = panel.querySelector('.tog');
+  const elType = panel.querySelector('.stype');
   const elSelInput = panel.querySelector('.sel');
   const elIdx = panel.querySelector('.idx');
   const elAttrs = panel.querySelector('.attrs');
@@ -189,6 +200,7 @@ function wcaInspector(opts) {
   let current = null;      // 当前选中的元素
   let enabled = false;     // 可视化选择开关
   let selectorOf = '';     // 当前元素对应的选择器
+  let selType = 'css';     // 选择器类型：css | xpath
   let pickSeq = 0;         // 选择次数，用于 "#N Element"
 
   /* ---------- 工具 ---------- */
@@ -252,12 +264,31 @@ function wcaInspector(opts) {
     return segments.join(' > ');
   }
 
+  /* 生成 XPath：优先 id，其次逐级带同标签序号的绝对路径 */
+  function buildXPath(el) {
+    if (!el || el.nodeType !== 1) return '';
+    if (el.id) return `//*[@id="${el.id}"]`;
+    const parts = [];
+    let cur = el;
+    while (cur && cur.nodeType === 1) {
+      let idx = 1;
+      let sib = cur.previousElementSibling;
+      while (sib) {
+        if (sib.tagName === cur.tagName) idx += 1;
+        sib = sib.previousElementSibling;
+      }
+      parts.unshift(`${cur.tagName.toLowerCase()}[${idx}]`);
+      cur = cur.parentElement;
+    }
+    return '/' + parts.join('/');
+  }
+
   /* ---------- 渲染选中元素 ---------- */
 
   function renderElement(el) {
     if (!el || el.nodeType !== 1) return;
     current = el;
-    selectorOf = buildSelector(el);
+    selectorOf = selType === 'xpath' ? buildXPath(el) : buildSelector(el);
     pickSeq += 1;
     elSelInput.value = selectorOf;
     elIdx.textContent = '#' + pickSeq + '  <' + el.tagName.toLowerCase() + '>';
@@ -329,6 +360,16 @@ function wcaInspector(opts) {
 
   elToggle.addEventListener('change', () => setEnabled(elToggle.checked));
 
+  // 切换选择器类型：按当前元素重新生成
+  elType.addEventListener('change', () => {
+    selType = elType.value;
+    if (current) {
+      selectorOf = selType === 'xpath' ? buildXPath(current) : buildSelector(current);
+      elSelInput.value = selectorOf;
+      updateUseBtn();
+    }
+  });
+
   panel.querySelector('.x').addEventListener('click', () => close());
 
   panel.querySelector('.up').addEventListener('click', () => {
@@ -383,7 +424,7 @@ function wcaInspector(opts) {
     panel.querySelector('.foot').before(elUse);
     elUse.addEventListener('click', () => {
       if (!selectorOf) return;
-      sendMsg({ type: 'WCA_INSPECTOR_RESULT', requestId: REQ, selector: selectorOf });
+      sendMsg({ type: 'WCA_INSPECTOR_RESULT', requestId: REQ, selector: selectorOf, selectorType: selType });
       close(true);
     });
   }
@@ -405,5 +446,9 @@ function wcaInspector(opts) {
   }
 
   setEnabled(false);
+  if (opts && (opts.selectorType === 'xpath' || opts.selectorType === 'css')) {
+    selType = opts.selectorType;
+    elType.value = selType;
+  }
   return { ok: true };
 }

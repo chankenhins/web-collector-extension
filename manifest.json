@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "TopData",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "TopData：节点编排式网页内容采集，打开页面 → 提取文本/属性/图片 → 组装 Markdown，一键复制或下载。",
   "action": {
     "default_title": "TopData",

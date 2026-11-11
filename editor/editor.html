@@ -14,7 +14,10 @@
         <span class="logo-badge">T</span>
         <span class="home-title">TopData</span>
       </div>
-      <button id="homeNewBtn" class="btn btn-primary">＋ 新建工作流</button>
+      <div class="home-actions">
+        <button id="homeImportBtn" class="btn" title="从 JSON 文件导入工作流">导入</button>
+        <button id="homeNewBtn" class="btn btn-primary">＋ 新建工作流</button>
+      </div>
     </header>
     <main class="home-main">
       <div id="homeList" class="wf-list"></div>
@@ -33,6 +36,15 @@
         <input id="workflowName" type="text" maxlength="50" placeholder="未命名工作流" title="工作流名称">
       </div>
       <div class="top-actions">
+        <div class="file-menu-wrap">
+          <button id="fileBtn" class="btn" title="保存 / 导入 / 导出工作流">文件 ▾</button>
+          <div id="fileMenu" class="file-menu hidden">
+            <button data-op="save">保存工作流</button>
+            <button data-op="exportOne">导出当前工作流</button>
+            <button data-op="exportAll">导出全部工作流</button>
+            <button data-op="import">导入工作流…</button>
+          </div>
+        </div>
         <button id="settingsBtn" class="btn">全局设置</button>
         <button id="runBtn" class="btn btn-primary">运行</button>
       </div>
@@ -73,8 +85,10 @@
         </div>
         <div id="tab-result" class="tab-page hidden">
           <div class="result-toolbar">
+            <select id="resultSelect" class="result-select hidden" title="切换结果"></select>
             <button id="copyMdBtn" class="btn">复制 Markdown</button>
             <button id="downloadMdBtn" class="btn">下载 .md</button>
+            <button id="downloadAllBtn" class="btn hidden">全部下载</button>
             <span id="resultHint" class="hint"></span>
           </div>
           <div class="result-panes">
@@ -106,6 +120,8 @@
       </div>
     </div>
   </div>
+
+  <input id="importFile" type="file" accept=".json,application/json" hidden>
 
   <script src="../common/store.js"></script>
   <script src="../common/inspector.js"></script>
