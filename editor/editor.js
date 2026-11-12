@@ -23,6 +23,7 @@ const NODE_TYPES = {
   condition:    { label: '条件分支',   badge: '条', block: true },
   conditionEnd: { label: '条件结束',   badge: '条', fixed: true, blockEnd: true },
   assemble:     { label: '文章组装',   badge: '文', unique: true },
+  export:       { label: '导出数据',   badge: '导' },
 };
 
 const DEFAULT_REGEX = () => ({ regexOn: false, regexPattern: '', regexFlags: 'g', regexRepl: '' });
@@ -50,6 +51,7 @@ const DEFAULTS = {
     title: '',
     template: '# 文章标题\n\n在此编写正文，使用 {{变量名}} 引用前面节点提取的内容。\n集合变量可用 {{#each 列表名}}…{{/each}}。\n',
   }),
+  export: () => ({ format: 'xlsx', sourceVar: '', fileName: '', includeHeader: true }),
 };
 
 const VAR_NAME_RE = /^[一-龥A-Za-z0-9_]{1,50}$/;
@@ -79,6 +81,7 @@ const PALETTE_GROUPS = [
   ] },
   { label: '结果输出', items: [
     ['assemble', '文章组装', '生成 Markdown'],
+    ['export', '导出数据', 'Excel / CSV 文件'],
   ] },
 ];
 
@@ -143,11 +146,17 @@ function displayName(node) {
   if (node.type === 'condition') {
     return node.config.sourceVar ? `${t.label}：${node.config.sourceVar}` : t.label;
   }
+  if (node.type === 'export') {
+    return node.config.fileName ? `${t.label}：${node.config.fileName}` : t.label;
+  }
   return t.label;
 }
 
 const ICON_PLAY = '<svg viewBox="0 0 24 24" width="17" height="17" fill="currentColor"><path d="M8 5.5v13l11-6.5z"/></svg>';
 const ICON_MORE = '<svg viewBox="0 0 24 24" width="17" height="17" fill="currentColor"><circle cx="5" cy="12" r="1.8"/><circle cx="12" cy="12" r="1.8"/><circle cx="19" cy="12" r="1.8"/></svg>';
+const ICON_FLOW = '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="6" rx="1.5"/><rect x="14" y="15" width="7" height="6" rx="1.5"/><path d="M10 6h4a3 3 0 0 1 3 3v6"/><path d="M6.5 9v3a3 3 0 0 0 3 3H14"/></svg>';
+const ICON_FOLDER = '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><path d="M3.5 6.5A1.5 1.5 0 0 1 5 5h4l2 2.5h6.5A1.5 1.5 0 0 1 19 9v8.5a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 3 17.5z"/></svg>';
+const ICON_FOLDER_ALL = '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><rect x="3.5" y="3.5" width="7" height="7" rx="1.5"/><rect x="13.5" y="3.5" width="7" height="7" rx="1.5"/><rect x="3.5" y="13.5" width="7" height="7" rx="1.5"/><rect x="13.5" y="13.5" width="7" height="7" rx="1.5"/></svg>';
 
 function sanitizeFilename(name) {
   const cleaned = String(name).replace(/[\\/:*?"<>|]/g, '-').trim();
@@ -281,6 +290,8 @@ async function init() {
 
 /* ---------- 主页：工作流列表 ---------- */
 
+let currentFolder = 'all';   // 'all' = 全部，其余为文件夹 id
+
 function enterHome() {
   document.body.classList.add('home-mode');
   document.title = 'TopData · 工作流';
@@ -290,12 +301,14 @@ function enterHome() {
 
 function bindHomeUI() {
   $('#homeNewBtn').addEventListener('click', async () => {
-    const wf = WCAStore.makeWorkflow();
+    const folderId = currentFolder === 'all' ? null : currentFolder;
+    const wf = WCAStore.makeWorkflow(null, folderId);
     state.workflows.push(wf);
     await WCAStore.save(state);
     location.href = 'editor.html?id=' + encodeURIComponent(wf.id);
   });
   $('#homeImportBtn').addEventListener('click', () => importWorkflowFile());
+  $('#newFolderBtn').addEventListener('click', createFolder);
 
   // 点击空白处收起列表项的下拉菜单
   document.addEventListener('click', (e) => {
@@ -304,19 +317,88 @@ function bindHomeUI() {
   });
 }
 
+/* 日期：YYYY-MM-DD */
+function formatDate(ts) {
+  if (!ts) return '—';
+  const d = new Date(ts);
+  const p = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+
+function workflowsOf(folderId) {
+  const list = folderId === 'all'
+    ? state.workflows
+    : state.workflows.filter((w) => (w.folderId || null) === folderId);
+  return [...list].sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+}
+
+async function createFolder() {
+  const name = prompt('请输入文件夹名称（最多 20 个字符）：');
+  if (name == null) return;
+  const trimmed = name.trim();
+  if (!trimmed) { alert('文件夹名称不能为空。'); return; }
+  if (trimmed.length > 20) { alert('文件夹名称不能超过 20 个字符。'); return; }
+  if (state.folders.some((f) => f.name === trimmed)) { alert('已存在同名文件夹。'); return; }
+  state.folders.push(WCAStore.makeFolder(trimmed));
+  await WCAStore.save(state);
+  renderHome();
+}
+
+async function deleteFolder(folder) {
+  const count = state.workflows.filter((w) => w.folderId === folder.id).length;
+  const tip = count
+    ? `确定删除文件夹「${folder.name}」吗？其中的 ${count} 个工作流将移回「全部」。`
+    : `确定删除文件夹「${folder.name}」吗？`;
+  if (!confirm(tip)) return;
+  state.workflows.forEach((w) => { if (w.folderId === folder.id) w.folderId = null; });
+  state.folders = state.folders.filter((f) => f.id !== folder.id);
+  if (currentFolder === folder.id) currentFolder = 'all';
+  await WCAStore.save(state);
+  renderHome();
+}
+
+async function moveWorkflowTo(wfId, folderId) {
+  const wf = state.workflows.find((w) => w.id === wfId);
+  if (!wf) return;
+  const next = folderId === 'all' ? null : folderId;
+  if ((wf.folderId || null) === next) return;
+  wf.folderId = next;
+  await WCAStore.save(state);
+  renderHome();
+}
+
 function renderHome() {
+  renderFolders();
+
   const list = $('#homeList');
+  const wfs = workflowsOf(currentFolder);
   list.innerHTML = '';
-  const wfs = [...state.workflows].sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
   $('#homeEmpty').classList.toggle('hidden', wfs.length > 0);
+  $('#homeEmpty').textContent = currentFolder === 'all'
+    ? '还没有工作流，点击右上角「＋ 新建工作流」开始搭建采集流程。'
+    : '该文件夹里还没有工作流，把工作流拖拽到这里即可分组。';
+
+  const folder = state.folders.find((f) => f.id === currentFolder);
+  $('#currentFolderName').textContent = folder ? folder.name : '全部工作流';
+  $('#currentFolderCount').textContent = `${wfs.length} 个`;
 
   wfs.forEach((wf) => {
     const row = document.createElement('div');
     row.className = 'wf-row';
+    row.draggable = true;
+    const owner = state.folders.find((f) => f.id === wf.folderId);
     row.innerHTML = `
+      <span class="wf-badge">${ICON_FLOW}</span>
       <div class="wf-main">
         <div class="wf-name">${escapeHtml(wf.name || '未命名工作流')}</div>
-        <div class="wf-meta">${relativeTime(wf.updatedAt)} · ${wf.nodes.length} 个节点</div>
+        <div class="wf-meta">
+          <span>创建于 ${formatDate(wf.createdAt)}</span>
+          <span class="meta-sep">·</span>
+          <span>更新 ${relativeTime(wf.updatedAt)}</span>
+          <span class="meta-sep">·</span>
+          <span>${wf.nodes.length} 个节点</span>
+          ${owner ? `<span class="wf-folder-tag">${escapeHtml(owner.name)}</span>` : ''}
+        </div>
       </div>
       <button class="wf-icon" data-op="run" title="运行工作流">${ICON_PLAY}</button>
       <button class="wf-icon" data-op="more" title="更多操作">${ICON_MORE}</button>
@@ -324,6 +406,13 @@ function renderHome() {
         <button data-op="rename">重命名</button>
         <button data-op="del" class="danger">删除</button>
       </div>`;
+
+    row.addEventListener('dragstart', (e) => {
+      e.dataTransfer.setData('text/plain', wf.id);
+      e.dataTransfer.effectAllowed = 'move';
+      row.classList.add('dragging');
+    });
+    row.addEventListener('dragend', () => row.classList.remove('dragging'));
 
     row.querySelector('.wf-main').addEventListener('click', () => openWorkflow(wf.id));
     row.querySelector('[data-op="run"]').addEventListener('click', (e) => {
@@ -346,6 +435,66 @@ function renderHome() {
       deleteWorkflow(wf);
     });
     list.appendChild(row);
+  });
+}
+
+/* 文件夹侧栏：全部 + 自定义文件夹，支持拖入工作流 */
+function renderFolders() {
+  const box = $('#folderList');
+  box.innerHTML = '';
+
+  const items = [{
+    id: 'all',
+    name: '全部',
+    count: state.workflows.length,
+    icon: ICON_FOLDER_ALL,
+  }].concat(state.folders.map((f) => ({
+    id: f.id,
+    name: f.name,
+    count: state.workflows.filter((w) => w.folderId === f.id).length,
+    icon: ICON_FOLDER,
+  })));
+
+  items.forEach((item) => {
+    const row = document.createElement('div');
+    row.className = 'folder-item' + (item.id === currentFolder ? ' active' : '');
+    row.dataset.folder = item.id;
+    row.innerHTML = `
+      <span class="folder-icon">${item.icon}</span>
+      <span class="folder-name">${escapeHtml(item.name)}</span>
+      <span class="folder-count">${item.count}</span>
+      ${item.id === 'all' ? '' : '<button class="folder-del" title="删除文件夹">×</button>'}`;
+
+    row.addEventListener('click', () => {
+      currentFolder = item.id;
+      renderHome();
+    });
+
+    if (item.id !== 'all') {
+      row.querySelector('.folder-del').addEventListener('click', (e) => {
+        e.stopPropagation();
+        const folder = state.folders.find((f) => f.id === item.id);
+        if (folder) deleteFolder(folder);
+      });
+    }
+
+    // 拖拽工作流到文件夹
+    row.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'move';
+      row.classList.add('drop-target');
+    });
+    row.addEventListener('dragleave', (e) => {
+      if (!row.contains(e.relatedTarget)) row.classList.remove('drop-target');
+    });
+    row.addEventListener('drop', async (e) => {
+      e.preventDefault();
+      row.classList.remove('drop-target');
+      const wfId = e.dataTransfer.getData('text/plain');
+      if (wfId) await moveWorkflowTo(wfId, item.id);
+    });
+
+    box.appendChild(row);
   });
 }
 
@@ -455,6 +604,8 @@ function normalizeImported(item) {
     name: item.name || '导入的工作流',
     nodes,
     updatedAt: Date.now(),
+    createdAt: Date.now(),
+    folderId: null,
   };
 }
 
@@ -534,6 +685,7 @@ function bindEditorUI() {
   });
 
   $('#runBtn').addEventListener('click', runWorkflow);
+  $('#saveBtn').addEventListener('click', () => handleFileOp('save'));
   bindCanvasUI();
   $('#settingsBtn').addEventListener('click', openSettings);
   $('#settingsCancel').addEventListener('click', () => $('#settingsModal').classList.add('hidden'));
@@ -1030,6 +1182,7 @@ function nodeSubtitle(node) {
     case 'loop':    return c.overVar ? `遍历 {{${c.overVar}}}，当前项 → {{${c.itemVar || 'item'}}}` : '未指定集合变量';
     case 'condition': return `${c.sourceVar || '?'} ${opLabel(c.operator)}${c.compareValue ? ' ' + c.compareValue : ''}`;
     case 'assemble':return c.title ? `《${c.title}》` : '未配置标题';
+    case 'export':  return `${c.format === 'csv' ? 'CSV' : 'Excel'} · ${c.fileName || '当前日期'} · {{${c.sourceVar || '?'}}}`;
     default: return '';
   }
 }
@@ -1258,6 +1411,19 @@ function renderConfigForm() {
       <div class="field-hint">位于循环体内时，每次循环都会产出一篇独立 Markdown，结果面板可逐篇切换、批量下载。</div>`;
   }
 
+  if (node.type === 'export') {
+    const listVars = availableVars().filter((v) => v.list);
+    const opts = listVars.length
+      ? listVars.map((v) => `<option value="${escapeAttr(v.name)}" ${c.sourceVar === v.name ? 'selected' : ''}>${escapeHtml(v.name)}</option>`).join('')
+      : '<option value="">（暂无集合变量）</option>';
+    const today = formatDate(Date.now());
+    body = `
+      ${f('导出格式', radio('format', c.format || 'xlsx', [['xlsx', 'Excel（.xlsx）'], ['csv', 'CSV（.csv）']]), true, 'Excel 为真实 xlsx 文件，可直接用 Excel / WPS / Numbers 打开；CSV 带 UTF-8 BOM，避免中文乱码。')}
+      ${f('数据来源（集合变量）', `<select data-k="sourceVar">${opts}</select>`, true, '取“批量提取”或“提取内容（列表集合）”产出的集合变量，每个元素为一行；对象元素的字段会成为列。')}
+      ${f('文件名', `<input type="text" data-k="fileName" value="${escapeAttr(c.fileName || '')}" maxlength="80" placeholder="留空则使用当前日期（${today}）">`, false, '不含扩展名，导出时自动追加 .xlsx / .csv。支持 {{变量名}}，如 {{标题}}。')}
+      ${f('包含表头', `<label class="switch-field"><input type="checkbox" data-k="includeHeader" ${c.includeHeader !== false ? 'checked' : ''}> 启用</label>`, false, '首行写入字段名（列标题）。')}`;
+  }
+
   box.innerHTML = `
     <div class="form-title"><span class="node-badge ${node.type}">${t.badge}</span>${t.label}</div>
     <div class="form-desc">${nodeDesc(node.type)}</div>
@@ -1440,6 +1606,7 @@ function nodeDesc(type) {
     condition: '条件分支：判断成立时执行区间内节点，不成立则整段跳过。',
     conditionEnd: '条件结束标记：与“条件分支”配对，节点不可单独删除或移动。',
     assemble: '用前面节点的变量组装 Markdown（每个工作流最多一个）。',
+    export: '把集合变量导出为 Excel（.xlsx）或 CSV 文件；文件名为空时使用当前日期。',
   }[type] || '';
 }
 
@@ -1716,6 +1883,17 @@ function validateWorkflow() {
         }
       });
     }
+
+    if (n.type === 'export') {
+      const src = (c.sourceVar || '').trim();
+      if (!src) errs.push({ id: n.id, msg: '导出数据：未选择数据来源集合变量' });
+      else if (!defs.has(src) || !defs.get(src).list) {
+        errs.push({ id: n.id, msg: `导出数据：集合变量「${src}」不存在或不是集合类型变量` });
+      }
+      if (/[\\/:*?"<>|]/.test(c.fileName || '')) {
+        errs.push({ id: n.id, msg: '导出数据：文件名不能包含 \\ / : * ? " < > | 等字符' });
+      }
+    }
   });
 
   validateBlocks(errs);
@@ -1973,6 +2151,18 @@ async function runNode(node, ctx) {
       ctx.markdowns.push({ title, markdown });
       setStatus(node.id, markdown.trim() ? 'success' : 'empty');
       log('success', `文章组装完成：${title}，共 ${markdown.length} 字符。`);
+      break;
+    }
+    case 'export': {
+      const result = await execExport(node, ctx);
+      if (!result) {
+        setStatus(node.id, 'empty');
+        log('warn', '集合为空，未生成导出文件。');
+        break;
+      }
+      ctx.outputs.push({ name: `导出文件：${result.filename}`, value: `${result.rows} 行 × ${result.columns} 列` });
+      setStatus(node.id, 'success');
+      log('success', `已导出 ${result.filename}（${result.rows} 行 × ${result.columns} 列）。`);
       break;
     }
   }
@@ -2350,6 +2540,230 @@ function waitDownload(downloadId, timeoutMs) {
       browser.downloads.onChanged.removeListener(onChanged);
     }
     browser.downloads.onChanged.addListener(onChanged);
+  });
+}
+
+/* ----- 导出数据（Excel / CSV） ----- */
+
+async function execExport(node, ctx) {
+  const cfg = node.config;
+  const list = ctx.vars[cfg.sourceVar];
+  if (!Array.isArray(list)) throw new Error(`集合变量「${cfg.sourceVar}」不存在或不是集合`);
+  if (!list.length) return null;
+
+  const { columns, rows } = buildTableData(list, cfg.sourceVar);
+  if (!columns.length || !rows.length) return null;
+
+  const includeHeader = cfg.includeHeader !== false;
+  const rawName = renderTemplate(cfg.fileName || '', ctx.vars, ctx.loopScope).trim();
+  const base = sanitizeFilename(rawName || formatDate(Date.now()));
+  const isCsv = cfg.format === 'csv';
+  const filename = `${base}.${isCsv ? 'csv' : 'xlsx'}`;
+  const blob = isCsv
+    ? tableToCsv(columns, rows, includeHeader)
+    : tableToXlsx(columns, rows, includeHeader);
+
+  const dataUrl = await blobToDataURL(blob);
+  let downloadId;
+  try {
+    downloadId = await browser.downloads.download({ url: dataUrl, filename, conflictAction: 'uniquify', saveAs: false });
+  } catch (e) {
+    throw new Error('导出文件失败：' + e.message);
+  }
+  try { await waitDownload(downloadId, 60000); }
+  catch (e) { throw new Error('导出文件写入失败：' + e.message); }
+  return { filename, rows: rows.length, columns: columns.length };
+}
+
+/* 集合 -> 表格：对象元素取字段并集为列，数组元素按位置生成列，普通值单列 */
+function buildTableData(list, sourceName) {
+  const isObj = (v) => v && typeof v === 'object' && !Array.isArray(v);
+  const first = list.find((v) => v != null);
+
+  if (isObj(first)) {
+    const columns = [];
+    list.forEach((item) => {
+      if (isObj(item)) Object.keys(item).forEach((k) => { if (!columns.includes(k)) columns.push(k); });
+    });
+    const rows = list.map((item) => columns.map((k) => (isObj(item) && item[k] != null ? stringifyValue(item[k]) : '')));
+    return { columns, rows };
+  }
+
+  if (Array.isArray(first)) {
+    let width = 0;
+    list.forEach((item) => { if (Array.isArray(item)) width = Math.max(width, item.length); });
+    const columns = Array.from({ length: width }, (_, i) => `列${i + 1}`);
+    const rows = list.map((item) => columns.map((_, i) => {
+      if (Array.isArray(item)) return item[i] == null ? '' : stringifyValue(item[i]);
+      return i === 0 ? stringifyValue(item) : '';
+    }));
+    return { columns, rows };
+  }
+
+  const rows = list.map((v) => [v == null ? '' : stringifyValue(v)]);
+  return { columns: [sourceName], rows };
+}
+
+function tableToCsv(columns, rows, includeHeader) {
+  const cell = (v) => {
+    const s = v == null ? '' : String(v);
+    return /[",\n\r]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+  };
+  const lines = [];
+  if (includeHeader) lines.push(columns.map(cell).join(','));
+  rows.forEach((r) => lines.push(r.map(cell).join(',')));
+  const text = '\ufeff' + lines.join('\r\n') + '\r\n';
+  return new Blob([text], { type: 'text/csv;charset=utf-8' });
+}
+
+/* 生成最小可用的 xlsx（ZIP 存储模式，无第三方依赖） */
+function tableToXlsx(columns, rows, includeHeader) {
+  const esc = (s) => String(s).replace(/[&<>"']/g, (ch) => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&apos;',
+  }[ch]));
+  const colRef = (i) => {
+    let n = i + 1, s = '';
+    while (n > 0) { const m = (n - 1) % 26; s = String.fromCharCode(65 + m) + s; n = Math.floor((n - 1) / 26); }
+    return s;
+  };
+
+  const all = includeHeader ? [columns, ...rows] : rows;
+  const rowXml = all.map((row, r) => {
+    const cells = row.map((v, ci) =>
+      `<c r="${colRef(ci)}${r + 1}" t="inlineStr"><is><t xml:space="preserve">${esc(v == null ? '' : v)}</t></is></c>`).join('');
+    return `<row r="${r + 1}">${cells}</row>`;
+  }).join('');
+
+  const head = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>';
+  return zipStore([
+    {
+      name: '[Content_Types].xml',
+      data: head + '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+        + '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+        + '<Default Extension="xml" ContentType="application/xml"/>'
+        + '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>'
+        + '<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
+        + '</Types>',
+    },
+    {
+      name: '_rels/.rels',
+      data: head + '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        + '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>'
+        + '</Relationships>',
+    },
+    {
+      name: 'xl/workbook.xml',
+      data: head + '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
+        + 'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+        + '<sheets><sheet name="数据" sheetId="1" r:id="rId1"/></sheets></workbook>',
+    },
+    {
+      name: 'xl/_rels/workbook.xml.rels',
+      data: head + '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        + '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>'
+        + '</Relationships>',
+    },
+    {
+      name: 'xl/worksheets/sheet1.xml',
+      data: head + '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+        + `<sheetData>${rowXml}</sheetData></worksheet>`,
+    },
+  ]);
+}
+
+/* 最简 ZIP 打包（仅存储，不压缩），文件名使用 UTF-8 标记 */
+function zipStore(entries) {
+  const enc = new TextEncoder();
+  const now = new Date();
+  const dosTime = ((now.getHours() << 11) | (now.getMinutes() << 5) | (now.getSeconds() >> 1)) & 0xffff;
+  const dosDate = (((now.getFullYear() - 1980) << 9) | ((now.getMonth() + 1) << 5) | now.getDate()) & 0xffff;
+
+  const parts = [];
+  const central = [];
+  let offset = 0;
+
+  entries.forEach(({ name, data }) => {
+    const nameBytes = enc.encode(name);
+    const bytes = typeof data === 'string' ? enc.encode(data) : data;
+    const crc = crc32(bytes);
+
+    const local = new Uint8Array(30 + nameBytes.length);
+    const lv = new DataView(local.buffer);
+    lv.setUint32(0, 0x04034b50, true);
+    lv.setUint16(4, 20, true);
+    lv.setUint16(6, 0x0800, true);
+    lv.setUint16(8, 0, true);
+    lv.setUint16(10, dosTime, true);
+    lv.setUint16(12, dosDate, true);
+    lv.setUint32(14, crc, true);
+    lv.setUint32(18, bytes.length, true);
+    lv.setUint32(22, bytes.length, true);
+    lv.setUint16(26, nameBytes.length, true);
+    lv.setUint16(28, 0, true);
+    local.set(nameBytes, 30);
+
+    const cd = new Uint8Array(46 + nameBytes.length);
+    const cv = new DataView(cd.buffer);
+    cv.setUint32(0, 0x02014b50, true);
+    cv.setUint16(4, 20, true);
+    cv.setUint16(6, 20, true);
+    cv.setUint16(8, 0x0800, true);
+    cv.setUint16(10, 0, true);
+    cv.setUint16(12, dosTime, true);
+    cv.setUint16(14, dosDate, true);
+    cv.setUint32(16, crc, true);
+    cv.setUint32(20, bytes.length, true);
+    cv.setUint32(24, bytes.length, true);
+    cv.setUint16(28, nameBytes.length, true);
+    cv.setUint16(30, 0, true);
+    cv.setUint16(32, 0, true);
+    cv.setUint16(34, 0, true);
+    cv.setUint16(36, 0, true);
+    cv.setUint32(38, 0, true);
+    cv.setUint32(42, offset, true);
+    cd.set(nameBytes, 46);
+
+    parts.push(local, bytes);
+    central.push(cd);
+    offset += local.length + bytes.length;
+  });
+
+  const cdSize = central.reduce((s, c) => s + c.length, 0);
+  const eocd = new Uint8Array(22);
+  const ev = new DataView(eocd.buffer);
+  ev.setUint32(0, 0x06054b50, true);
+  ev.setUint16(8, entries.length, true);
+  ev.setUint16(10, entries.length, true);
+  ev.setUint32(12, cdSize, true);
+  ev.setUint32(16, offset, true);
+
+  return new Blob(
+    [...parts, ...central, eocd],
+    { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }
+  );
+}
+
+let CRC_TABLE = null;
+function crc32(bytes) {
+  if (!CRC_TABLE) {
+    CRC_TABLE = new Uint32Array(256);
+    for (let i = 0; i < 256; i++) {
+      let c = i;
+      for (let k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
+      CRC_TABLE[i] = c >>> 0;
+    }
+  }
+  let crc = 0xFFFFFFFF;
+  for (let i = 0; i < bytes.length; i++) crc = (crc >>> 8) ^ CRC_TABLE[(crc ^ bytes[i]) & 0xFF];
+  return (crc ^ 0xFFFFFFFF) >>> 0;
+}
+
+function blobToDataURL(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = () => reject(new Error('文件编码失败'));
+    reader.readAsDataURL(blob);
   });
 }
 
