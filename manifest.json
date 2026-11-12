@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "TopData",
-  "version": "0.5.0",
-  "description": "TopData：节点编排式网页内容采集，打开页面 → 提取文本/属性/图片 → 组装 Markdown，一键复制或下载。",
+  "version": "0.7.0",
+  "description": "TopData：节点编排式网页内容采集，打开页面 → 提取文本/属性/图片 → 组装 Markdown，一键复制或下载。兼容 Chrome、Microsoft Edge、Firefox 等主流浏览器。",
   "action": {
     "default_title": "TopData",
     "default_popup": "popup/popup.html",
@@ -20,5 +20,11 @@
     "128": "icons/icon128.png"
   },
   "permissions": ["tabs", "scripting", "downloads", "storage"],
-  "host_permissions": ["<all_urls>"]
+  "host_permissions": ["<all_urls>"],
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "topdata@local",
+      "strict_min_version": "115.0"
+    }
+  }
 }

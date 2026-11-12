@@ -2,14 +2,14 @@
  * TopData · 页面可视化元素选择浮层（共享）
  *
  * 用法（popup / editor 页面内）：
- *   chrome.scripting.executeScript({
+ *   browser.scripting.executeScript({
  *     target: { tabId },
  *     func: wcaInspector,
  *     args: [{ mode: 'inspect' | 'pick', requestId }],
  *   });
  *
  * 说明：wcaInspector 会被序列化后注入页面执行，函数体内不可引用
- * 任何外部变量。pick 模式在用户确认后通过 chrome.runtime.sendMessage
+ * 任何外部变量。pick 模式在用户确认后通过 browser.runtime.sendMessage
  * 回传 { type: 'WCA_INSPECTOR_RESULT', requestId, selector }。
  * ============================================================ */
 
@@ -222,7 +222,7 @@ function wcaInspector(opts) {
 
   function sendMsg(payload) {
     try {
-      const p = chrome.runtime.sendMessage(payload);
+      const p = browser.runtime.sendMessage(payload);
       if (p && typeof p.catch === 'function') p.catch(() => {});
     } catch (e) { /* 无接收方时忽略 */ }
   }

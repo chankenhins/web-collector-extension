@@ -564,7 +564,7 @@ function bindEditorUI() {
   });
 
   // 接收目标页面选择浮层回传的选择器
-  chrome.runtime.onMessage.addListener((msg) => {
+  browser.runtime.onMessage.addListener((msg) => {
     if (!msg || msg.type !== 'WCA_INSPECTOR_RESULT') return;
     if (!pickRequestId || msg.requestId !== pickRequestId) return;
     const node = getNode(pickNodeId);
@@ -1820,7 +1820,7 @@ async function runWorkflow() {
     await execRange(0, workflow.nodes.length, ctx, pairs);
     // 全部成功：按需自动关闭目标标签页
     if (ctx.autoClose && ctx.tabId != null) {
-      try { await chrome.tabs.remove(ctx.tabId); log('info', '已按配置自动关闭目标标签页。'); }
+      try { await browser.tabs.remove(ctx.tabId); log('info', '已按配置自动关闭目标标签页。'); }
       catch (e) { /* 标签页可能已被用户关闭，忽略 */ }
     }
     log('success', '工作流执行完成。');
@@ -1994,13 +1994,13 @@ async function execOpenTab(node, ctx) {
   let tab = null;
 
   if (openMode === 'current') {
-    const editorPrefix = chrome.runtime.getURL('');
-    const [active] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+    const editorPrefix = browser.runtime.getURL('');
+    const [active] = await browser.tabs.query({ active: true, lastFocusedWindow: true });
     if (active && !active.url.startsWith(editorPrefix) && /^https?:/.test(active.url || '')) {
-      tab = await chrome.tabs.update(active.id, { url });
+      tab = await browser.tabs.update(active.id, { url });
     }
   }
-  if (!tab) tab = await chrome.tabs.create({ url });
+  if (!tab) tab = await browser.tabs.create({ url });
   ctx.tabId = tab.id;
   ctx.autoClose = !!autoClose;
 
@@ -2028,14 +2028,14 @@ function waitTabComplete(tabId, timeoutMs) {
     }
     function cleanup() {
       clearTimeout(timer);
-      chrome.tabs.onUpdated.removeListener(onUpdated);
-      chrome.tabs.onRemoved.removeListener(onRemoved);
+      browser.tabs.onUpdated.removeListener(onUpdated);
+      browser.tabs.onRemoved.removeListener(onRemoved);
     }
 
-    chrome.tabs.onUpdated.addListener(onUpdated);
-    chrome.tabs.onRemoved.addListener(onRemoved);
+    browser.tabs.onUpdated.addListener(onUpdated);
+    browser.tabs.onRemoved.addListener(onRemoved);
     // 若创建时已是完成状态（如缓存命中），直接返回
-    chrome.tabs.get(tabId).then((t) => {
+    browser.tabs.get(tabId).then((t) => {
       if (t && t.status === 'complete') { cleanup(); resolve(); }
     }).catch(() => {});
   });
@@ -2043,7 +2043,7 @@ function waitTabComplete(tabId, timeoutMs) {
 
 async function ensureTabAlive(tabId) {
   try {
-    await chrome.tabs.get(tabId);
+    await browser.tabs.get(tabId);
   } catch (e) {
     throw new Error('目标标签页已关闭，后续节点无法执行');
   }
@@ -2056,8 +2056,9 @@ async function execExtractLike(node, ctx, opts) {
   const cfg = node.config;
   let results;
   try {
-    results = await chrome.scripting.executeScript({
+    results = await browser.scripting.executeScript({
       target: { tabId: ctx.tabId },
+      world: 'ISOLATED',
       func: pageExtract,
       args: [{
         selector: cfg.selector,
@@ -2166,8 +2167,9 @@ async function execList(node, ctx) {
 
     let r;
     try {
-      const results = await chrome.scripting.executeScript({
+      const results = await browser.scripting.executeScript({
         target: { tabId: ctx.tabId },
+        world: 'ISOLATED',
         func: pageExtractList,
         args: [{
           selector: cfg.selector,
@@ -2312,7 +2314,7 @@ async function execImage(node, ctx) {
   const filename = `${folder}/${String(ctx.imgSeq).padStart(3, '0')}${guessExt(url)}`;
   let downloadId;
   try {
-    downloadId = await chrome.downloads.download({ url, filename, conflictAction: 'uniquify', saveAs: false });
+    downloadId = await browser.downloads.download({ url, filename, conflictAction: 'uniquify', saveAs: false });
   } catch (e) {
     if (cfg.onFail === 'continue') { log('warn', `图片下载失败：${e.message}，按配置置空并继续。`); return ''; }
     throw new Error('图片下载失败：' + e.message);
@@ -2348,9 +2350,9 @@ function waitDownload(downloadId, timeoutMs) {
     }
     function cleanup() {
       clearTimeout(timer);
-      chrome.downloads.onChanged.removeListener(onChanged);
+      browser.downloads.onChanged.removeListener(onChanged);
     }
-    chrome.downloads.onChanged.addListener(onChanged);
+    browser.downloads.onChanged.addListener(onChanged);
   });
 }
 
@@ -2366,9 +2368,9 @@ let pickFieldIndex = null;   // 非空表示正在为批量提取的某个字段
 
 /* 找到最近浏览过的普通网页标签页（排除扩展页面自身） */
 async function findTargetTab() {
-  const selfPrefix = chrome.runtime.getURL('');
-  const self = await chrome.tabs.getCurrent();
-  const tabs = await chrome.tabs.query({});
+  const selfPrefix = browser.runtime.getURL('');
+  const self = await browser.tabs.getCurrent();
+  const tabs = await browser.tabs.query({});
   const cands = tabs.filter((t) =>
     /^https?:/i.test(t.url || '')
     && !(t.url || '').startsWith(selfPrefix)
@@ -2436,13 +2438,14 @@ async function startPicker(node, btn, fieldIndex) {
   }
 
   try {
-    await chrome.scripting.executeScript({
+    await browser.scripting.executeScript({
       target: { tabId: tab.id },
+      world: 'ISOLATED',
       func: wcaInspector,
       args: [args],
     });
     // 切到目标页，让用户看到浮层
-    await chrome.tabs.update(tab.id, { active: true });
+    await browser.tabs.update(tab.id, { active: true });
     switchTab('log');
     log('info', forField
       ? `已在「${tab.title || tab.url}」打开选择面板：点击列表项内部的元素，回传的会是相对当前列表项的选择器。`

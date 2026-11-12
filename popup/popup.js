@@ -31,14 +31,15 @@ function showMsg(text) {
 
 /* 在当前活动网页注入选择浮层，随后关闭弹窗让用户看到页面 */
 async function onPick() {
-  const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+  const [tab] = await browser.tabs.query({ active: true, lastFocusedWindow: true });
   if (!tab || !/^https?:/i.test(tab.url || '')) {
     showMsg('当前标签页不是普通网页，无法选择元素。请切换到 http/https 页面后重试。');
     return;
   }
   try {
-    await chrome.scripting.executeScript({
+    await browser.scripting.executeScript({
       target: { tabId: tab.id },
+      world: 'ISOLATED',
       func: wcaInspector,
       args: [{ mode: 'inspect' }],
     });
@@ -53,7 +54,7 @@ async function onPick() {
 function openEditor(id, autorun) {
   let url = 'editor/editor.html';
   if (id) url += '?id=' + encodeURIComponent(id) + (autorun ? '&autorun=1' : '');
-  chrome.tabs.create({ url: chrome.runtime.getURL(url) });
+  browser.tabs.create({ url: browser.runtime.getURL(url) });
   window.close();
 }
 

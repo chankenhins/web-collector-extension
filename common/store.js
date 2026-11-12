@@ -2,7 +2,7 @@
  * 网页采集助手 · 共享存储模块
  * 编辑器（editor）与图标弹窗（popup）共用，保证数据结构一致。
  *
- * chrome.storage.local 结构：
+ * browser.storage.local 结构：
  *   state: {
  *     workflows: [{ id, name, nodes: [{id, type, config}], updatedAt }],
  *     settings:  { pageTimeoutSec, imageFolder }
@@ -36,7 +36,7 @@ const WCAStore = (() => {
 
   // 读取全部状态；旧版本（单工作流 workflow/settings 两个 key）自动迁移
   async function load() {
-    const data = await chrome.storage.local.get([KEY, 'workflow', 'settings']);
+    const data = await browser.storage.local.get([KEY, 'workflow', 'settings']);
     let state = data[KEY];
     if (!state || !Array.isArray(state.workflows)) {
       state = {
@@ -51,15 +51,15 @@ const WCAStore = (() => {
           updatedAt: Date.now(),
         });
       }
-      await chrome.storage.local.set({ [KEY]: state });
-      await chrome.storage.local.remove(['workflow', 'settings']);
+      await browser.storage.local.set({ [KEY]: state });
+      await browser.storage.local.remove(['workflow', 'settings']);
     }
     state.settings = Object.assign({}, DEFAULT_SETTINGS, state.settings || {});
     return state;
   }
 
   function save(state) {
-    return chrome.storage.local.set({ [KEY]: state });
+    return browser.storage.local.set({ [KEY]: state });
   }
 
   return { KEY, DEFAULT_SETTINGS, uid, makeWorkflow, load, save };
