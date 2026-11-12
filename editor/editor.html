@@ -29,15 +29,22 @@
 
   <!-- ========== 编辑器视图 ========== -->
   <div id="editorView">
-    <!-- 顶部栏 -->
+    <!-- 顶部：流程信息与操作 -->
     <header id="topbar">
       <div class="brand">
-        <button id="backBtn" class="btn" title="返回工作流列表">← 列表</button>
-        <input id="workflowName" type="text" maxlength="50" placeholder="未命名工作流" title="工作流名称">
+        <button id="backBtn" class="btn back-btn" title="返回工作流列表">← <span>列表</span></button>
+        <span class="logo-badge">T</span>
+        <div class="workflow-heading">
+          <input id="workflowName" type="text" maxlength="50" placeholder="未命名工作流" title="工作流名称">
+          <div class="workflow-meta">
+            <span id="workflowNodeMeta">0 个节点</span><span class="meta-dot">·</span>
+            <span id="saveState" class="save-state">已保存到本地</span>
+          </div>
+        </div>
       </div>
       <div class="top-actions">
         <div class="file-menu-wrap">
-          <button id="fileBtn" class="btn" title="保存 / 导入 / 导出工作流">文件 ▾</button>
+          <button id="fileBtn" class="btn" title="保存 / 导入 / 导出工作流">文件 <span class="chevron">▾</span></button>
           <div id="fileMenu" class="file-menu hidden">
             <button data-op="save">保存工作流</button>
             <button data-op="exportOne">导出当前工作流</button>
@@ -50,29 +57,76 @@
       </div>
     </header>
 
-    <!-- 主区域：左节点列表 + 右配置表单 -->
+    <!-- 主区域：节点库 + 流程画布 + 节点配置 -->
     <main id="main">
       <aside id="nodePanel">
-        <div class="panel-title">节点流程</div>
-        <div id="nodeList" class="node-list"></div>
-        <div class="add-node-wrap">
-          <button id="addNodeBtn" class="btn btn-dashed">+ 添加节点</button>
-          <div id="addNodeMenu" class="add-node-menu hidden"></div>
+        <div class="panel-title palette-title">
+          <span class="panel-heading">节点库</span>
+          <button id="paletteToggle" class="panel-toggle" title="收起节点库" aria-label="收起节点库" aria-expanded="true">
+            <svg viewBox="0 0 20 20" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12.5 5 7.5 10l5 5M8 5 3 10l5 5"/></svg>
+          </button>
+        </div>
+        <div class="palette-body">
+          <label class="palette-search">
+            <svg viewBox="0 0 20 20" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="8.5" cy="8.5" r="5.5"/><path d="m13 13 4 4"/></svg>
+            <input id="nodeSearch" type="search" placeholder="搜索节点" autocomplete="off">
+          </label>
+          <div id="nodePalette" class="node-palette"></div>
+          <div class="palette-tip">
+            <span class="tip-icon">↗</span>
+            <span>拖拽节点到画布，或点击添加到当前节点之后</span>
+          </div>
         </div>
       </aside>
 
-      <section id="configPanel">
-        <div class="panel-title">节点配置</div>
-        <div id="configForm" class="config-form"></div>
+      <section id="canvasPanel">
+        <div class="canvas-toolbar">
+          <div class="canvas-title">流程画布 <span id="canvasNodeCount" class="canvas-count">0</span></div>
+          <div class="canvas-controls">
+            <button id="fitCanvas" class="canvas-btn text-btn" title="缩放以显示全部节点">适应</button>
+            <span class="control-divider"></span>
+            <button id="zoomOut" class="canvas-btn" title="缩小">−</button>
+            <button id="zoomLabel" class="zoom-label" title="恢复 100%">100%</button>
+            <button id="zoomIn" class="canvas-btn" title="放大">＋</button>
+            <button id="resetCanvas" class="canvas-btn" title="重置画布位置">
+              <svg viewBox="0 0 20 20" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M4 8a6 6 0 1 1 .6 5M4 3v5h5"/></svg>
+            </button>
+          </div>
+        </div>
+        <div id="canvasViewport">
+          <div id="canvasWorld">
+            <div class="canvas-start"><span></span>START</div>
+            <svg id="canvasEdges" aria-hidden="true"></svg>
+            <div id="nodeList" class="node-list"></div>
+            <div id="dropIndicator" class="drop-indicator hidden"><span>＋ 插入到这里</span></div>
+          </div>
+        </div>
+        <div class="canvas-footer">
+          <span>拖动空白处平移 · Ctrl / ⌘ + 滚轮缩放</span>
+          <span id="canvasSelectionHint">点击节点编辑配置</span>
+        </div>
       </section>
+
+      <aside id="configPanel">
+        <div class="panel-title config-title">
+          <span>节点配置</span><span id="configNodeBadge" class="config-node-badge">未选择</span>
+        </div>
+        <div id="configForm" class="config-form"></div>
+      </aside>
     </main>
 
     <!-- 底部：日志 / 输出摘要 / Markdown 结果 -->
     <footer id="bottomPanel">
-      <div class="tabs">
-        <button class="tab active" data-tab="log">运行日志</button>
-        <button class="tab" data-tab="output">输出摘要</button>
-        <button class="tab" data-tab="result">Markdown 结果</button>
+      <div class="bottom-bar">
+        <div class="tabs">
+          <button class="tab active" data-tab="log">运行日志</button>
+          <button class="tab" data-tab="output">输出摘要</button>
+          <button class="tab" data-tab="result">Markdown 结果</button>
+        </div>
+        <button id="bottomToggle" class="panel-toggle bottom-toggle" title="收起底部面板" aria-label="收起底部面板" aria-expanded="true">
+          <span>收起</span>
+          <svg viewBox="0 0 20 20" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.7"><path d="m5 8 5 5 5-5"/></svg>
+        </button>
       </div>
       <div class="tab-pages">
         <div id="tab-log" class="tab-page"><div id="logList" class="log-list"></div></div>

@@ -66,6 +66,32 @@ const CONDITION_OPS = [
   ['lt', '小于（数字）'],
 ];
 
+/* 左侧节点库分组：[类型, 名称, 说明] */
+const PALETTE_GROUPS = [
+  { label: '数据采集', items: [
+    ['extract', '提取内容', '文本 / 属性值'],
+    ['list', '批量提取', '集合 / 字段映射'],
+    ['image', '下载图片', '图片保存与引用'],
+  ] },
+  { label: '流程控制', items: [
+    ['loop', '循环', '遍历集合变量'],
+    ['condition', '条件分支', '按条件执行'],
+  ] },
+  { label: '结果输出', items: [
+    ['assemble', '文章组装', '生成 Markdown'],
+  ] },
+];
+
+const PALETTE_TYPES = new Set(PALETTE_GROUPS.reduce((acc, g) => acc.concat(g.items.map((it) => it[0])), []));
+
+/* 画布尺寸：卡片等宽居中，嵌套按层缩进 */
+const CANVAS_WIDTH = 760;
+const CANVAS_CARD_WIDTH = 340;
+const CANVAS_CARD_X = (CANVAS_WIDTH - CANVAS_CARD_WIDTH) / 2;
+const CANVAS_NODE_GAP = 46;
+const CANVAS_DEPTH_OFFSET = 44;
+const CANVAS_START_Y = 78;
+
 /* ---------- 状态 ---------- */
 
 let state = null;              // 全量状态 { workflows, settings }，结构见 common/store.js
@@ -79,6 +105,11 @@ let lastMarkdown = null;
 let lastTitle = '';
 let lastMarkdowns = [];        // 多篇结果（循环内组装会产出多篇）
 let resultIndex = 0;
+let canvasScale = 1;
+let canvasPan = { x: 0, y: 0 };
+let canvasLayout = [];         // [{ id, x, y, w, h }]，渲染后供连线/拖放定位使用
+let canvasWorldHeight = 600;
+let canvasDropIndex = null;
 
 /* ---------- 工具 ---------- */
 
@@ -134,8 +165,13 @@ function sanitizeFolder(input) {
 let saveTimer = null;
 function saveState() {
   if (workflow) workflow.updatedAt = Date.now();
+  const label = $('#saveState');
+  if (label) { label.textContent = '正在保存…'; label.classList.add('saving'); }
   clearTimeout(saveTimer);
-  saveTimer = setTimeout(() => { WCAStore.save(state); }, 300);
+  saveTimer = setTimeout(async () => {
+    await WCAStore.save(state);
+    if (label) { label.textContent = '已保存到本地'; label.classList.remove('saving'); }
+  }, 300);
 }
 
 /* 立即落盘 */
@@ -143,6 +179,8 @@ async function saveNow() {
   clearTimeout(saveTimer);
   if (workflow) workflow.updatedAt = Date.now();
   await WCAStore.save(state);
+  const label = $('#saveState');
+  if (label) { label.textContent = '已保存到本地'; label.classList.remove('saving'); }
 }
 
 /* 相对时间：刚刚 / N 分钟前 / N 小时前 / N 天前 / N 个月前 / N 年前 */
@@ -231,7 +269,8 @@ async function init() {
   document.title = `${workflow.name || '未命名工作流'} · TopData`;
   bindEditorUI();
   renderAll();
-  log('info', '就绪。搭建节点流程后点击右上角"运行"。');
+  requestAnimationFrame(resetCanvas);
+  log('info', '就绪。从左侧拖入节点搭建流程，点击右上角"运行"。');
 
   // 来自弹窗"运行"：打开后立即执行，并去掉 autorun 参数避免刷新重跑
   if (params.get('autorun') === '1') {
@@ -495,7 +534,7 @@ function bindEditorUI() {
   });
 
   $('#runBtn').addEventListener('click', runWorkflow);
-  $('#addNodeBtn').addEventListener('click', toggleAddMenu);
+  bindCanvasUI();
   $('#settingsBtn').addEventListener('click', openSettings);
   $('#settingsCancel').addEventListener('click', () => $('#settingsModal').classList.add('hidden'));
   $('#settingsSave').addEventListener('click', saveSettings);
@@ -563,11 +602,6 @@ function bindEditorUI() {
     resetPickState();
   });
 
-  // 点击页面其它区域时收起"添加节点"菜单
-  document.addEventListener('click', (e) => {
-    if (!e.target.closest('.add-node-wrap')) $('#addNodeMenu').classList.add('hidden');
-  });
-
   // 运行中关闭页面前提示
   window.addEventListener('beforeunload', (e) => {
     if (running) { e.preventDefault(); e.returnValue = ''; }
@@ -580,40 +614,45 @@ function renderAll() {
   renderConfigForm();
 }
 
-/* ---------- 节点列表 ---------- */
+/* ---------- 流程画布 ---------- */
 
 function renderNodeList() {
   const list = $('#nodeList');
+  if (!list) return;
   list.innerHTML = '';
+  canvasLayout = [];
   const depths = computeDepths(workflow.nodes);
-  workflow.nodes.forEach((node, i) => {
-    if (i > 0) {
-      const conn = document.createElement('div');
-      conn.className = 'node-connector';
-      list.appendChild(conn);
-    }
+  let y = CANVAS_START_Y;
+
+  workflow.nodes.forEach((node) => {
     const t = NODE_TYPES[node.type];
     const isEnd = !!t.blockEnd;
+    const depth = depths[node.id] || 0;
+    const x = CANVAS_CARD_X + depth * CANVAS_DEPTH_OFFSET;
+
     const card = document.createElement('div');
     card.className = 'node-card'
       + (isEnd ? ' block-end' : '')
       + (node.id === selectedId ? ' selected' : '')
       + (invalidIds.has(node.id) ? ' invalid' : '');
-    card.style.marginLeft = `${(depths[node.id] || 0) * 16}px`;
+    card.dataset.nodeId = node.id;
+    card.style.left = `${x}px`;
+    card.style.top = `${y}px`;
+    card.style.width = `${CANVAS_CARD_WIDTH}px`;
 
-    const sub = nodeSubtitle(node);
+    const sub = isEnd ? '' : nodeSubtitle(node);
     card.innerHTML = `
-      <span class="node-badge ${node.type}">${t.badge}</span>
-      <div class="node-info">
-        <div class="node-name">${escapeHtml(displayName(node))}</div>
-        ${sub ? `<div class="node-sub">${escapeHtml(sub)}</div>` : ''}
+      <div class="node-card-head">
+        <span class="node-badge ${node.type}">${t.badge}</span>
+        <span class="node-name">${escapeHtml(displayName(node))}</span>
+        <span class="status-dot ${nodeStatus[node.id] || 'idle'}" title="${escapeAttr(statusTitle(node.id))}"></span>
       </div>
-      <span class="node-ops">
-        ${!t.fixed ? `<button class="btn" data-op="up" title="上移">↑</button>
-        <button class="btn" data-op="down" title="下移">↓</button>
-        <button class="btn danger" data-op="del" title="删除">×</button>` : ''}
-      </span>
-      <span class="status-dot ${nodeStatus[node.id] || 'idle'}" title="${statusTitle(node.id)}"></span>
+      ${sub ? `<div class="node-sub">${escapeHtml(sub)}</div>` : ''}
+      ${!t.fixed ? `<span class="node-ops">
+        <button class="node-op" data-op="up" title="上移">↑</button>
+        <button class="node-op" data-op="down" title="下移">↓</button>
+        <button class="node-op danger" data-op="del" title="删除">×</button>
+      </span>` : ''}
     `;
     card.addEventListener('click', (e) => {
       const op = e.target.dataset && e.target.dataset.op;
@@ -623,7 +662,321 @@ function renderNodeList() {
       renderConfigForm();
     });
     list.appendChild(card);
+
+    const h = card.offsetHeight || (isEnd ? 42 : 66);
+    canvasLayout.push({ id: node.id, x, y, w: CANVAS_CARD_WIDTH, h });
+    y += h + CANVAS_NODE_GAP;
   });
+
+  canvasWorldHeight = Math.max(320, y + 20);
+  const world = $('#canvasWorld');
+  if (world) world.style.height = `${canvasWorldHeight}px`;
+  drawCanvasEdges();
+  updateCanvasMeta();
+  renderPalette();
+}
+
+/* 节点之间的贝塞尔连线；首个节点从 START 连出 */
+function drawCanvasEdges() {
+  const svg = $('#canvasEdges');
+  if (!svg) return;
+  const nodes = workflow.nodes;
+  const parts = [];
+  if (canvasLayout.length) {
+    const first = canvasLayout[0];
+    const x1 = CANVAS_WIDTH / 2;
+    const y1 = 44;
+    const x2 = first.x + first.w / 2;
+    const y2 = first.y;
+    parts.push(`<path class="canvas-edge${first.id === selectedId ? ' selected' : ''}" d="M ${x1} ${y1} C ${x1} ${y1 + 18}, ${x2} ${y2 - 18}, ${x2} ${y2}"></path>`);
+  }
+  for (let i = 0; i < canvasLayout.length - 1; i++) {
+    const a = canvasLayout[i];
+    const b = canvasLayout[i + 1];
+    const x1 = a.x + a.w / 2;
+    const y1 = a.y + a.h;
+    const x2 = b.x + b.w / 2;
+    const y2 = b.y;
+    const k = Math.max(12, (y2 - y1) / 2);
+    const active = nodes[i].id === selectedId || nodes[i + 1].id === selectedId;
+    parts.push(`<path class="canvas-edge${active ? ' selected' : ''}" d="M ${x1} ${y1} C ${x1} ${y1 + k}, ${x2} ${y2 - k}, ${x2} ${y2}"></path>`);
+  }
+  svg.setAttribute('width', String(CANVAS_WIDTH));
+  svg.setAttribute('height', String(canvasWorldHeight));
+  svg.innerHTML = parts.join('');
+}
+
+function updateCanvasMeta() {
+  const count = workflow.nodes.length;
+  const countEl = $('#canvasNodeCount');
+  if (countEl) countEl.textContent = String(count);
+  const metaEl = $('#workflowNodeMeta');
+  if (metaEl) metaEl.textContent = `${count} 个节点`;
+}
+
+/* ---------- 左侧节点库 ---------- */
+
+function renderPalette() {
+  const box = $('#nodePalette');
+  if (!box) return;
+  const input = $('#nodeSearch');
+  const q = (input ? input.value : '').trim().toLowerCase();
+  const hasAssemble = workflow.nodes.some((n) => n.type === 'assemble');
+  let html = '';
+
+  PALETTE_GROUPS.forEach((group) => {
+    const items = group.items.filter(([type, name, desc]) => {
+      if (!q) return true;
+      return name.toLowerCase().includes(q)
+        || desc.toLowerCase().includes(q)
+        || type.toLowerCase().includes(q);
+    });
+    if (!items.length) return;
+    html += `<div class="palette-group"><div class="palette-group-title">${group.label}</div><div class="palette-grid">`;
+    items.forEach(([type, name, desc]) => {
+      const t = NODE_TYPES[type];
+      if (!t) return;
+      const disabled = type === 'assemble' && hasAssemble;
+      html += `<button class="palette-item" data-type="${type}" draggable="${disabled ? 'false' : 'true'}"
+        ${disabled ? 'disabled' : ''} title="${escapeAttr(disabled ? '已存在（最多一个）' : desc)}">
+        <span class="node-badge ${type}">${t.badge}</span>
+        <span class="palette-item-name">${name}</span>
+      </button>`;
+    });
+    html += '</div></div>';
+  });
+
+  box.innerHTML = html || '<div class="palette-empty">没有匹配的节点</div>';
+
+  box.querySelectorAll('.palette-item').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      if (!btn.disabled) addNode(btn.dataset.type);
+    });
+    btn.addEventListener('dragstart', (e) => {
+      if (btn.disabled) { e.preventDefault(); return; }
+      e.dataTransfer.setData('text/plain', btn.dataset.type);
+      e.dataTransfer.effectAllowed = 'copy';
+      btn.classList.add('dragging');
+    });
+    btn.addEventListener('dragend', () => btn.classList.remove('dragging'));
+  });
+}
+
+function isPaletteNodeType(type) { return PALETTE_TYPES.has(type); }
+
+/* ---------- 画布交互 ---------- */
+
+function bindCanvasUI() {
+  renderPalette();
+
+  const search = $('#nodeSearch');
+  if (search) search.addEventListener('input', renderPalette);
+
+  const paletteToggle = $('#paletteToggle');
+  if (paletteToggle) {
+    paletteToggle.addEventListener('click', () => {
+      const collapsed = document.body.classList.toggle('palette-collapsed');
+      paletteToggle.setAttribute('aria-expanded', String(!collapsed));
+      paletteToggle.title = collapsed ? '展开节点库' : '收起节点库';
+      paletteToggle.setAttribute('aria-label', paletteToggle.title);
+    });
+  }
+
+  const bottomToggle = $('#bottomToggle');
+  if (bottomToggle) bottomToggle.addEventListener('click', () => {
+    setBottomCollapsed(!document.body.classList.contains('bottom-collapsed'));
+  });
+
+  const zoomIn = $('#zoomIn');
+  if (zoomIn) zoomIn.addEventListener('click', () => setCanvasScale(canvasScale * 1.1));
+  const zoomOut = $('#zoomOut');
+  if (zoomOut) zoomOut.addEventListener('click', () => setCanvasScale(canvasScale / 1.1));
+  const zoomLabel = $('#zoomLabel');
+  if (zoomLabel) zoomLabel.addEventListener('click', () => setCanvasScale(1));
+  const fit = $('#fitCanvas');
+  if (fit) fit.addEventListener('click', fitCanvas);
+  const reset = $('#resetCanvas');
+  if (reset) reset.addEventListener('click', resetCanvas);
+
+  const vp = $('#canvasViewport');
+  if (!vp) return;
+
+  // 空白处拖动平移
+  let panning = false;
+  let panStart = { x: 0, y: 0 };
+  vp.addEventListener('pointerdown', (e) => {
+    if (e.button !== 0 || e.target.closest('.node-card')) return;
+    panning = true;
+    panStart = { x: e.clientX - canvasPan.x, y: e.clientY - canvasPan.y };
+    vp.classList.add('panning');
+    try { vp.setPointerCapture(e.pointerId); } catch (_) { /* 忽略 */ }
+  });
+  vp.addEventListener('pointermove', (e) => {
+    if (!panning) return;
+    canvasPan.x = e.clientX - panStart.x;
+    canvasPan.y = e.clientY - panStart.y;
+    applyCanvasTransform();
+  });
+  const endPan = (e) => {
+    if (!panning) return;
+    panning = false;
+    vp.classList.remove('panning');
+    try { vp.releasePointerCapture(e.pointerId); } catch (_) { /* 忽略 */ }
+  };
+  vp.addEventListener('pointerup', endPan);
+  vp.addEventListener('pointercancel', endPan);
+
+  // 滚轮平移；Ctrl / ⌘ + 滚轮以鼠标为锚点缩放
+  vp.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    if (e.ctrlKey || e.metaKey) {
+      setCanvasScale(canvasScale * (e.deltaY > 0 ? 0.9 : 1.1), e.clientX, e.clientY);
+      return;
+    }
+    canvasPan.x -= e.deltaX;
+    canvasPan.y -= e.deltaY;
+    applyCanvasTransform();
+  }, { passive: false });
+
+  // 从节点库拖入
+  vp.addEventListener('dragover', (e) => {
+    if (!Array.from(e.dataTransfer ? e.dataTransfer.types : []).includes('text/plain')) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'copy';
+    vp.classList.add('drag-over');
+    updateCanvasDrop(e);
+  });
+  vp.addEventListener('dragleave', (e) => {
+    if (e.relatedTarget && vp.contains(e.relatedTarget)) return;
+    vp.classList.remove('drag-over');
+    hideCanvasDrop();
+  });
+  vp.addEventListener('drop', (e) => {
+    e.preventDefault();
+    vp.classList.remove('drag-over');
+    const type = e.dataTransfer ? e.dataTransfer.getData('text/plain') : '';
+    const point = canvasPoint(e.clientX, e.clientY);
+    const idx = computeDropIndex(point.y);
+    hideCanvasDrop();
+    if (isPaletteNodeType(type)) addNode(type, idx);
+  });
+}
+
+function setBottomCollapsed(collapsed) {
+  document.body.classList.toggle('bottom-collapsed', !!collapsed);
+  const btn = $('#bottomToggle');
+  if (!btn) return;
+  btn.setAttribute('aria-expanded', String(!collapsed));
+  btn.title = collapsed ? '展开底部面板' : '收起底部面板';
+  btn.setAttribute('aria-label', btn.title);
+  const label = btn.querySelector('span');
+  if (label) label.textContent = collapsed ? '展开' : '收起';
+}
+
+function applyCanvasTransform() {
+  const world = $('#canvasWorld');
+  if (world) {
+    world.style.transform = `translate(${canvasPan.x}px, ${canvasPan.y}px) scale(${canvasScale})`;
+  }
+  const label = $('#zoomLabel');
+  if (label) label.textContent = `${Math.round(canvasScale * 100)}%`;
+}
+
+function setCanvasScale(next, clientX, clientY) {
+  const clamped = Math.min(2, Math.max(0.4, next));
+  if (Number.isFinite(clientX) && Number.isFinite(clientY)) {
+    const rect = $('#canvasViewport').getBoundingClientRect();
+    const px = clientX - rect.left;
+    const py = clientY - rect.top;
+    const wx = (px - canvasPan.x) / canvasScale;
+    const wy = (py - canvasPan.y) / canvasScale;
+    canvasScale = clamped;
+    canvasPan.x = px - wx * canvasScale;
+    canvasPan.y = py - wy * canvasScale;
+  } else {
+    canvasScale = clamped;
+  }
+  applyCanvasTransform();
+}
+
+function resetCanvas() {
+  const vp = $('#canvasViewport');
+  if (!vp) return;
+  canvasScale = 1;
+  canvasPan = {
+    x: Math.max(24, (vp.clientWidth - CANVAS_WIDTH) / 2),
+    y: 18,
+  };
+  applyCanvasTransform();
+}
+
+function fitCanvas() {
+  const vp = $('#canvasViewport');
+  if (!vp || !vp.clientWidth) return;
+  const contentH = canvasWorldHeight + 24;
+  const scale = Math.min(1, (vp.clientWidth - 48) / CANVAS_WIDTH, (vp.clientHeight - 32) / contentH);
+  canvasScale = Math.max(0.4, scale);
+  canvasPan = {
+    x: Math.max(16, (vp.clientWidth - CANVAS_WIDTH * canvasScale) / 2),
+    y: Math.max(12, (vp.clientHeight - contentH * canvasScale) / 2),
+  };
+  applyCanvasTransform();
+}
+
+function centerCanvasNode(id) {
+  const item = canvasLayout.find((l) => l.id === id);
+  const vp = $('#canvasViewport');
+  if (!item || !vp || !vp.clientHeight) return;
+  canvasPan.x = Math.max(24, (vp.clientWidth - CANVAS_WIDTH * canvasScale) / 2);
+  canvasPan.y = vp.clientHeight / 2 - (item.y + item.h / 2) * canvasScale;
+  applyCanvasTransform();
+}
+
+/* 屏幕坐标 → 画布世界坐标 */
+function canvasPoint(clientX, clientY) {
+  const rect = $('#canvasViewport').getBoundingClientRect();
+  return {
+    x: (clientX - rect.left - canvasPan.x) / canvasScale,
+    y: (clientY - rect.top - canvasPan.y) / canvasScale,
+  };
+}
+
+/* 世界纵坐标 → 插入下标（最小为 1，保证 openTab 始终在首位） */
+function computeDropIndex(worldY) {
+  let idx = workflow.nodes.length;
+  for (let i = 0; i < canvasLayout.length; i++) {
+    const item = canvasLayout[i];
+    if (worldY < item.y + item.h / 2) { idx = i; break; }
+  }
+  return Math.min(workflow.nodes.length, Math.max(1, idx));
+}
+
+function updateCanvasDrop(e) {
+  const point = canvasPoint(e.clientX, e.clientY);
+  const idx = computeDropIndex(point.y);
+  canvasDropIndex = idx;
+  const indicator = $('#dropIndicator');
+  if (!indicator) return;
+  let y;
+  if (!canvasLayout.length) {
+    y = CANVAS_START_Y - CANVAS_NODE_GAP / 2;
+  } else if (idx >= canvasLayout.length) {
+    const last = canvasLayout[canvasLayout.length - 1];
+    y = last.y + last.h + CANVAS_NODE_GAP / 2;
+  } else {
+    y = canvasLayout[idx].y - CANVAS_NODE_GAP / 2;
+  }
+  indicator.style.left = `${CANVAS_CARD_X - 12}px`;
+  indicator.style.right = 'auto';
+  indicator.style.width = `${CANVAS_CARD_WIDTH + 24}px`;
+  indicator.style.top = `${y}px`;
+  indicator.classList.remove('hidden');
+}
+
+function hideCanvasDrop() {
+  canvasDropIndex = null;
+  const indicator = $('#dropIndicator');
+  if (indicator) indicator.classList.add('hidden');
 }
 
 /* 计算每个节点的块嵌套深度（结束标记归到外层） */
@@ -731,32 +1084,18 @@ function handleNodeOp(id, op) {
 
 /* ---------- 添加节点 ---------- */
 
-function toggleAddMenu() {
-  const menu = $('#addNodeMenu');
-  if (!menu.classList.contains('hidden')) { menu.classList.add('hidden'); return; }
-  const hasAssemble = workflow.nodes.some((n) => n.type === 'assemble');
-  menu.innerHTML = `
-    <button data-type="extract"><span class="node-badge extract">取</span>提取内容<span class="menu-desc">文本 / 属性值</span></button>
-    <button data-type="list"><span class="node-badge list">列</span>批量提取<span class="menu-desc">集合变量 / 翻页</span></button>
-    <button data-type="image"><span class="node-badge image">图</span>下载图片<span class="menu-desc">保存到本地</span></button>
-    <button data-type="loop"><span class="node-badge loop">循</span>循环<span class="menu-desc">遍历集合变量</span></button>
-    <button data-type="condition"><span class="node-badge condition">条</span>条件分支<span class="menu-desc">满足才执行内部节点</span></button>
-    <button data-type="assemble" ${hasAssemble ? 'disabled' : ''}><span class="node-badge assemble">文</span>文章组装<span class="menu-desc">${hasAssemble ? '已存在（最多一个）' : '生成 Markdown'}</span></button>
-  `;
-  menu.querySelectorAll('button[data-type]').forEach((btn) => {
-    btn.addEventListener('click', () => {
-      addNode(btn.dataset.type);
-      menu.classList.add('hidden');
-    });
-  });
-  menu.classList.remove('hidden');
-}
-
-function addNode(type) {
+function addNode(type, insertAt) {
+  if (type === 'assemble' && workflow.nodes.some((n) => n.type === 'assemble')) {
+    switchTab('log');
+    log('warn', '每个工作流最多只能添加一个文章组装节点。');
+    return;
+  }
   const node = makeNode(type);
-  // 插入到选中节点之后；未选中或选中的是最后一个则追加
+  // 拖入时使用指示线位置；点击节点库时插入到当前选中节点之后。
   const idx = workflow.nodes.findIndex((n) => n.id === selectedId);
-  const pos = idx >= 0 ? idx + 1 : workflow.nodes.length;
+  const fallback = idx >= 0 ? idx + 1 : workflow.nodes.length;
+  const requested = Number.isFinite(insertAt) ? Math.trunc(insertAt) : fallback;
+  const pos = Math.min(workflow.nodes.length, Math.max(1, requested));
   // 块节点同时插入结束标记，形成空块
   const items = [node];
   if (type === 'loop') items.push(makeNode('loopEnd'));
@@ -767,15 +1106,26 @@ function addNode(type) {
   saveState();
   renderNodeList();
   renderConfigForm();
+  centerCanvasNode(node.id);
 }
 
 /* ---------- 配置表单 ---------- */
 
 function renderConfigForm() {
   const box = $('#configForm');
+  const badge = $('#configNodeBadge');
+  const selectionHint = $('#canvasSelectionHint');
   const node = getNode(selectedId);
-  if (!node) { box.innerHTML = '<div class="empty-hint">请选择左侧节点</div>'; return; }
+  if (!node) {
+    box.innerHTML = '<div class="empty-hint">请选择画布中的节点</div>';
+    if (badge) { badge.textContent = '未选择'; badge.removeAttribute('title'); }
+    if (selectionHint) { selectionHint.textContent = '点击节点编辑配置'; selectionHint.removeAttribute('title'); }
+    return;
+  }
   const t = NODE_TYPES[node.type];
+  const name = displayName(node);
+  if (badge) { badge.textContent = t.label; badge.title = name; }
+  if (selectionHint) { selectionHint.textContent = `正在配置：${name}`; selectionHint.title = name; }
   const c = node.config;
   let body = '';
 
@@ -1152,6 +1502,7 @@ function saveSettings() {
 /* ---------- 底部面板 ---------- */
 
 function switchTab(name) {
+  setBottomCollapsed(false);
   document.querySelectorAll('.tab').forEach((b) => b.classList.toggle('active', b.dataset.tab === name));
   document.querySelectorAll('.tab-page').forEach((p) => p.classList.add('hidden'));
   $(`#tab-${name}`).classList.remove('hidden');
