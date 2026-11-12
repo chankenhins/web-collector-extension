@@ -749,9 +749,6 @@ function renderPalette() {
   box.innerHTML = html || '<div class="palette-empty">没有匹配的节点</div>';
 
   box.querySelectorAll('.palette-item').forEach((btn) => {
-    btn.addEventListener('click', () => {
-      if (!btn.disabled) addNode(btn.dataset.type);
-    });
     btn.addEventListener('dragstart', (e) => {
       if (btn.disabled) { e.preventDefault(); return; }
       e.dataTransfer.setData('text/plain', btn.dataset.type);
